@@ -2330,14 +2330,7 @@ impl Program {
                 }
             }
             loop {
-                // Closed/interrupt/deadline/progress checks run once every
-                // check_interval instructions instead of on each one (SQLite
-                // similarly only checks at jump opcodes). The countdown
-                // persists across step calls, so the cadence spans the whole
-                // statement; callers regain control at every returned row
-                // regardless. It is reloaded from the progress handler's
-                // interval only when it reaches zero, so the steady-state
-                // cost is one decrement and its zero test, no atomics.
+                // interrupts / progress checks
                 state.check_countdown = state.check_countdown.wrapping_sub(1);
                 if state.check_countdown == 0 {
                     if let Some(result) = self.periodic_checks(state, pager)? {
@@ -2559,14 +2552,12 @@ impl Program {
         state: &mut ProgramState,
         pager: &Arc<Pager>,
     ) -> Result<Option<LoopStep>, Box<LimboError>> {
-        // A progress interval below CHECK_INTERVAL is rounded up to a power
-        // of two, the cadence the mask gate had before the countdown.
-        const CHECK_INTERVAL: u64 = 256;
+        const MAX_CHECK_INTERVAL: u64 = 256;
         let progress_ops = self.connection.progress_ops();
-        state.check_interval = if progress_ops == 0 || progress_ops >= CHECK_INTERVAL {
-            CHECK_INTERVAL
+        state.check_interval = if progress_ops == 0 || progress_ops >= MAX_CHECK_INTERVAL {
+            MAX_CHECK_INTERVAL
         } else {
-            progress_ops.next_power_of_two()
+            progress_ops
         };
         state.check_countdown = state.check_interval;
         if self.connection.is_closed() {
