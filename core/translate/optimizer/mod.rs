@@ -2414,7 +2414,7 @@ fn find_table_access_plan(
 
     // For multi-table queries, collect index method candidates to pass to the DP algorithm.
     // This allows the optimizer to consider index methods at any position in the join order.
-    let base_table_rows_for_candidates = table_references
+    let base_table_rows = table_references
         .joined_tables()
         .iter()
         .map(|t| base_row_estimate(schema, t, params))
@@ -2429,7 +2429,7 @@ fn find_table_access_plan(
             group_by,
             limit,
             offset,
-            &base_table_rows_for_candidates,
+            &base_table_rows,
             params,
         )?
     } else {
@@ -2438,21 +2438,6 @@ fn find_table_access_plan(
     let maybe_order_target = simple_aggregate
         .and_then(|sa| simple_aggregate_order_target(sa, table_references))
         .or_else(|| compute_order_target(order_by, group_by.as_mut(), table_references));
-    let mut constraints_per_table = constraints_from_where_clause(
-        where_clause,
-        table_references,
-        available_indexes,
-        subqueries,
-        schema,
-        params,
-    )?;
-
-    let base_table_rows = table_references
-        .joined_tables()
-        .iter()
-        .map(|t| base_row_estimate(schema, t, params))
-        .collect::<Vec<_>>();
-
     // Currently the expressions we evaluate as constraints are binary comparisons that (except for IS/IS NOT)
     // will never be true for a NULL operand.
     // If there are any constraints on the right hand side table of an outer join that are not part of the outer join condition,
@@ -2462,9 +2447,7 @@ fn find_table_access_plan(
     // there can never be a situation where null columns are emitted for t2 because t2.id = 5 will never be true in that case.
     // hence: we can convert the outer join into an inner join.
     //
-    // Converting a LEFT JOIN into an INNER JOIN is an optimization opportunity:
-    // it can enable join reordering and let more predicates participate in key selection.
-    // -> recompute constraints if we rewrote a LEFT JOIN into an INNER JOIN.
+    // Converting a LEFT JOIN into an INNER JOIN can enable join reordering.
     loop {
         let mut outer_join_rewritten = false;
         for t in table_references.joined_tables_mut().iter_mut().filter(|t| {
@@ -2498,26 +2481,17 @@ fn find_table_access_plan(
         if !outer_join_rewritten {
             break;
         }
-        constraints_per_table = constraints_from_where_clause(
-            where_clause,
-            table_references,
-            available_indexes,
-            subqueries,
-            schema,
-            params,
-        )?;
     }
 
-    if add_implied_column_equalities(where_clause, table_references)? != 0 {
-        constraints_per_table = constraints_from_where_clause(
-            where_clause,
-            table_references,
-            available_indexes,
-            subqueries,
-            schema,
-            params,
-        )?;
-    }
+    add_implied_column_equalities(where_clause, table_references)?;
+    let mut constraints_per_table = constraints_from_where_clause(
+        where_clause,
+        table_references,
+        available_indexes,
+        subqueries,
+        schema,
+        params,
+    )?;
 
     // Enforce INDEXED BY / NOT INDEXED after outer-join rewrites settle, because
     // a null-rejecting WHERE term can turn a LEFT JOIN into an INNER JOIN and
