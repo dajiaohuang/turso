@@ -1,3 +1,4 @@
+mod test_delete_returning_row_image;
 mod test_alter_table_reopen;
 mod test_btree;
 mod test_ddl;

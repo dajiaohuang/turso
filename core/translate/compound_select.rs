@@ -9,7 +9,9 @@ use crate::translate::emitter::{
 use crate::translate::eqp::{EqpCompoundOp, EqpDetail, EqpSortMethod};
 use crate::translate::expr::translate_expr;
 use crate::translate::order_by::{custom_type_comparator, sorter_insert};
-use crate::translate::plan::{CompoundOrderByKey, Plan, QueryDestination, SelectPlan};
+use crate::translate::plan::{
+    select_plan_has_outer_scope_dependency, CompoundOrderByKey, Plan, QueryDestination, SelectPlan,
+};
 use crate::translate::result_row::emit_columns_to_destination;
 use crate::vdbe::builder::{CursorType, ProgramBuilder};
 use crate::vdbe::insn::{Insn, SorterOpenData};
@@ -44,7 +46,15 @@ pub fn emit_program_for_compound_select(
     let offset_owned = offset.clone();
     let right_most_ctx = Box::new(TranslateCtx::new(
         program,
-        resolver.fork(),
+        if select_plan_has_outer_scope_dependency(right_most)
+            || left
+                .iter()
+                .any(|(plan, _)| select_plan_has_outer_scope_dependency(plan))
+        {
+            resolver.fork_with_expr_cache()
+        } else {
+            resolver.fork()
+        },
         right_most.table_references.joined_tables().len(),
         false,
     ));
@@ -281,7 +291,11 @@ fn emit_compound_select(
     }
     let mut right_most_ctx = Box::new(TranslateCtx::new(
         program,
-        resolver.fork(),
+        if select_plan_has_outer_scope_dependency(right_most) {
+            resolver.fork_with_expr_cache()
+        } else {
+            resolver.fork()
+        },
         right_most.table_references.joined_tables().len(),
         false,
     ));

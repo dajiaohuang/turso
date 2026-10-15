@@ -1728,6 +1728,11 @@ pub fn emit_from_clause_subquery(
     // the second invocation would find the hash table already removed and
     // produce no matches. The hash build itself is guarded by Once and
     // therefore correctly persists across re-invocations.
+    let resolver = if plan_is_correlated(plan) {
+        t_ctx.resolver.fork_with_expr_cache()
+    } else {
+        t_ctx.resolver.fork()
+    };
     let result_column_start_reg = program.nested(|program| -> Result<usize> {
         Ok(match plan {
             Plan::Select(select_plan) => {
@@ -1753,7 +1758,7 @@ pub fn emit_from_clause_subquery(
                     limit_ctx: None,
                     reg_offset: None,
                     reg_limit_offset_sum: None,
-                    resolver: t_ctx.resolver.fork(),
+                    resolver,
                     non_aggregate_expressions: Vec::new(),
                     agg_leaf_columns: Vec::new(),
                     cdc_cursor_id: None,
@@ -1770,7 +1775,6 @@ pub fn emit_from_clause_subquery(
                 emit_query(program, select_plan, &mut metadata)?
             }
             Plan::CompoundSelect { .. } => {
-                let resolver = t_ctx.resolver.fork();
                 // emit_program_for_compound_select returns the result column start register
                 // for coroutine mode, which is needed by the outer query.
                 emit_program_for_compound_select(program, &resolver, plan)?
@@ -1815,6 +1819,11 @@ fn emit_indexed_materialized_subquery(
         };
     }
 
+    let resolver = if plan_is_correlated(plan) {
+        t_ctx.resolver.fork_with_expr_cache()
+    } else {
+        t_ctx.resolver.fork()
+    };
     let build_end = if plan_is_correlated(plan) {
         None
     } else {
@@ -1853,7 +1862,7 @@ fn emit_indexed_materialized_subquery(
                 limit_ctx: None,
                 reg_offset: None,
                 reg_limit_offset_sum: None,
-                resolver: t_ctx.resolver.fork(),
+                resolver,
                 non_aggregate_expressions: Vec::new(),
                 agg_leaf_columns: Vec::new(),
                 cdc_cursor_id: None,
@@ -1870,7 +1879,6 @@ fn emit_indexed_materialized_subquery(
             emit_query(program, select_plan, &mut metadata)?;
         }
         Plan::CompoundSelect { .. } => {
-            let resolver = t_ctx.resolver.fork();
             emit_program_for_compound_select(program, &resolver, plan)?;
         }
         Plan::RecursiveCte(_) => {
@@ -1917,6 +1925,11 @@ fn emit_materialized_subquery_table(
     // Allocate registers for reading result columns
     let result_columns_start_reg = program.alloc_registers(columns.len());
 
+    let resolver = if plan_is_correlated(plan) {
+        t_ctx.resolver.fork_with_expr_cache()
+    } else {
+        t_ctx.resolver.fork()
+    };
     let build_end = if plan_is_correlated(plan) {
         None
     } else {
@@ -1969,7 +1982,7 @@ fn emit_materialized_subquery_table(
                 limit_ctx: None,
                 reg_offset: None,
                 reg_limit_offset_sum: None,
-                resolver: t_ctx.resolver.fork(),
+                resolver,
                 non_aggregate_expressions: Vec::new(),
                 agg_leaf_columns: Vec::new(),
                 cdc_cursor_id: None,
@@ -1986,7 +1999,6 @@ fn emit_materialized_subquery_table(
             emit_query(program, select_plan, &mut metadata)?;
         }
         Plan::CompoundSelect { .. } => {
-            let resolver = t_ctx.resolver.fork();
             emit_program_for_compound_select(program, &resolver, plan)?;
         }
         Plan::RecursiveCte(recursive_cte) => {
