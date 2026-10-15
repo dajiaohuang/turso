@@ -2362,6 +2362,67 @@ fn test_concurrent_autoincrement_no_database_busy(tmp_db: TempDatabase) {
     );
 }
 
+#[test]
+fn test_mvcc_autoincrement_dotted_table_name() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("dotted_autoincrement.db");
+    {
+        let tmp_db = TempDatabase::builder()
+            .with_db_path(&path)
+            .with_mvcc(true)
+            .build();
+        let conn = tmp_db.connect_limbo();
+        for table in ["a.b", "A.b.c", "plain"] {
+            conn.execute(format!(
+                "CREATE TABLE \"{table}\" (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)"
+            ))
+            .unwrap();
+            conn.execute(format!("INSERT INTO \"{table}\" (v) VALUES ('x')"))
+                .unwrap();
+            conn.execute(format!(
+                "INSERT INTO \"{table}\" (id, v) VALUES (10, 'explicit')"
+            ))
+            .unwrap();
+            conn.execute(format!("INSERT INTO \"{table}\" (v) VALUES ('y')"))
+                .unwrap();
+            let rows: Vec<(i64, String, String)> = conn.exec_rows(&format!(
+                "SELECT id, v, typeof(v) FROM \"{table}\" ORDER BY id"
+            ));
+            assert_eq!(
+                rows,
+                vec![
+                    (1, "x".into(), "text".into()),
+                    (10, "explicit".into(), "text".into()),
+                    (11, "y".into(), "text".into())
+                ]
+            );
+        }
+        conn.execute("CREATE SEQUENCE control_seq START 7").unwrap();
+        let rows: Vec<(i64,)> = conn.exec_rows("SELECT nextval('main.control_seq')");
+        assert_eq!(rows, vec![(7,)]);
+        let rows: Vec<(i64,)> = conn.exec_rows("SELECT currval('main.control_seq')");
+        assert_eq!(rows, vec![(7,)]);
+        conn.close().unwrap();
+    }
+    let reopened = TempDatabase::builder()
+        .with_db_path(&path)
+        .with_mvcc(true)
+        .build();
+    let conn = reopened.connect_limbo();
+    for table in ["a.b", "A.b.c", "plain"] {
+        conn.execute(format!("INSERT INTO \"{table}\" (v) VALUES ('reopen')"))
+            .unwrap();
+        let rows: Vec<(i64, String)> =
+            conn.exec_rows(&format!("SELECT id, v FROM \"{table}\" WHERE v = 'reopen'"));
+        assert_eq!(rows, vec![(12, "reopen".into())]);
+    }
+    let rows: Vec<(i64,)> = conn.exec_rows("SELECT nextval('main.control_seq')");
+    assert_eq!(rows, vec![(8,)]);
+    let rows: Vec<(String,)> = conn.exec_rows("PRAGMA integrity_check");
+    assert_eq!(rows, vec![("ok".into(),)]);
+    conn.close().unwrap();
+}
+
 /// BEGIN IMMEDIATE emits a write Transaction for temp, but must not create the
 /// per-connection temp database just to lock it (SQLite treats it as a no-op
 /// while temp is not open). Creating it costs a temp file and an fsync on

@@ -239,9 +239,8 @@ pub(super) fn translate_sequence_function(
         // Reuse `start_reg` (the user's raw arg, possibly schema-qualified
         // such as `'aux.my_seq'`) as the seq-name register so per-session
         // `currval` stays keyed by the user's original spelling. The
-        // runtime handler strips the schema prefix when looking up the
-        // sequence object; the opcode's `db` field already encodes the
-        // correct database id resolved here.
+        // sequence emitter supplies the resolved bare name and database
+        // to its internal opcodes separately.
         crate::translate::sequence::emit_disk_read_nextval(
             program,
             resolver,

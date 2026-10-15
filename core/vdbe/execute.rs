@@ -14438,17 +14438,10 @@ pub fn op_sequence_compute_next(
         }
     };
 
-    // Strip the schema-qualifier from the user's spelling when the
-    // register contains a qualified name like "aux.my_seq" — the
-    // schema's sequences map is keyed by the bare name. The opcode's
-    // `db` field already encodes the target database.
-    let bare_seq_name = seq_name
-        .rsplit_once('.')
-        .map(|(_, n)| n)
-        .unwrap_or(&seq_name);
+    // The translator supplies the bare sequence name and target database.
     let seq = program
         .connection
-        .with_schema(*db, |s| s.get_sequence(bare_seq_name).cloned())
+        .with_schema(*db, |s| s.get_sequence(&seq_name).cloned())
         .ok_or_else(|| {
             crate::LimboError::ParseError(format!("sequence \"{seq_name}\" does not exist"))
         })?;
@@ -14600,11 +14593,7 @@ pub fn op_sequence_track_allocation(
             )
         })?;
 
-    let bare_seq_name = seq_name
-        .rsplit_once('.')
-        .map(|(_, n)| n)
-        .unwrap_or(&seq_name);
-    let normalized_seq_name = crate::util::normalize_ident(bare_seq_name);
+    let normalized_seq_name = crate::util::normalize_ident(&seq_name);
 
     if let Some(mv_store) = program.connection.mv_store_for_db(*db) {
         let seq = program
@@ -14693,11 +14682,7 @@ pub fn op_sequence_register_allocation(
             )
         })?;
 
-    let bare_seq_name = seq_name
-        .rsplit_once('.')
-        .map(|(_, n)| n)
-        .unwrap_or(&seq_name);
-    let normalized_seq_name = crate::util::normalize_ident(bare_seq_name);
+    let normalized_seq_name = crate::util::normalize_ident(&seq_name);
 
     if let Some(mv_store) = program.connection.mv_store_for_db(*db) {
         if mv_store.is_tx_rollbackable(outer_tx_id) {

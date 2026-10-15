@@ -196,8 +196,8 @@ pub fn emit_disk_read_nextval(
     let root_page = backing_table.root_page;
     let cursor_id = program.alloc_cursor_id(CursorType::BTreeTable(backing_table));
 
-    let seq_name_reg =
-        seq_name_reg.unwrap_or_else(|| program.emit_string8_new_reg(seq_name.to_string()));
+    let resolved_seq_name_reg = program.emit_string8_new_reg(seq_name.to_string());
+    let seq_name_reg = seq_name_reg.unwrap_or(resolved_seq_name_reg);
 
     // Inner-tx wrap state, shared by Begin/Commit. See
     // Insn::SequenceBeginInnerTx doc for the path-kind / saved-outer
@@ -259,7 +259,7 @@ pub fn emit_disk_read_nextval(
 
     program.emit_insn(Insn::SequenceComputeNext {
         db: database_id,
-        seq_name_reg,
+        seq_name_reg: resolved_seq_name_reg,
         in_value_reg: col_base,
         in_is_called_reg: col_base + 1,
         was_empty_reg,
@@ -368,7 +368,7 @@ pub fn emit_disk_read_nextval(
     // `op_sequence_register_allocation`.
     program.emit_insn(Insn::SequenceRegisterAllocation {
         db: database_id,
-        seq_name_reg,
+        seq_name_reg: resolved_seq_name_reg,
         value_reg: target_register,
         saved_outer_reg,
     });
@@ -398,7 +398,7 @@ pub fn emit_disk_read_nextval(
 
     program.emit_insn(Insn::SequenceTrackAllocation {
         db: database_id,
-        seq_name_reg,
+        seq_name_reg: resolved_seq_name_reg,
         value_reg: target_register,
     });
 
