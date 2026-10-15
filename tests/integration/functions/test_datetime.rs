@@ -81,6 +81,28 @@ fn hour_24_time_modifiers_do_not_shift_the_date() {
 }
 
 #[test]
+fn timediff_normalizes_overflowing_calendar_days() {
+    let io = Arc::new(FixedClockIo {
+        inner: MemoryIO::new(),
+        unix_secs: AtomicI64::new(1_000_000_000),
+    });
+    let db = Database::open_file(io, ":memory:", Arc::new(SqliteDialect)).unwrap();
+    let conn = db.connect(ConnectOpts::new()).unwrap();
+
+    let rows: Vec<(String, String, String)> = conn.exec_rows(
+        "SELECT timediff('2023-02-29', '2023-03-01'), timediff('2024-03-15', '2023-02-29'), timediff('2000-02-31', '2000-01-01')",
+    );
+    assert_eq!(
+        rows,
+        vec![(
+            "+0000-00-00 00:00:00.000".to_string(),
+            "+0001-00-14 00:00:00.000".to_string(),
+            "+0000-02-01 00:00:00.000".to_string(),
+        )]
+    );
+}
+
+#[test]
 fn current_time_comes_from_the_io_clock() {
     let io = Arc::new(FixedClockIo {
         inner: MemoryIO::new(),

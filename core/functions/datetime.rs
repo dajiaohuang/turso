@@ -1157,6 +1157,13 @@ where
         return Value::Null;
     }
 
+    if d1.valid_ymd && d1.d > 28 {
+        d1.valid_ymd = false;
+    }
+    if d2.valid_ymd && d2.d > 28 {
+        d2.valid_ymd = false;
+    }
+
     d1.compute_ymd_hms();
     d2.compute_ymd_hms();
 
