@@ -126,3 +126,136 @@ test outer-aggregate-in-a-table-function-argument-is-an-error {
 expect error {
     misuse of aggregate: json_group_array()
 }
+
+@cross-check-integrity
+test aggregate-two-query-levels-up {
+    CREATE TABLE t(a);
+    INSERT INTO t VALUES (1), (2), (NULL);
+    SELECT (SELECT (SELECT sum(t.a))) FROM t;
+}
+expect {
+    3
+}
+
+@cross-check-integrity
+test aggregate-three-query-levels-up {
+    CREATE TABLE t(a);
+    INSERT INTO t VALUES (1), (2), (NULL);
+    SELECT (SELECT (SELECT (SELECT sum(t.a)))) FROM t;
+}
+expect {
+    3
+}
+
+@cross-check-integrity
+test nested-outer-aggregate-after-filter {
+    CREATE TABLE t(a);
+    INSERT INTO t VALUES (1), (2), (3);
+    SELECT (SELECT (SELECT sum(t.a))) FROM t WHERE a > 1;
+}
+expect {
+    5
+}
+
+@cross-check-integrity
+test nested-outer-aggregate-per-group {
+    CREATE TABLE t(a);
+    INSERT INTO t VALUES (1), (2), (3);
+    SELECT a > 1, (SELECT (SELECT sum(t.a))) FROM t GROUP BY a > 1 ORDER BY 1;
+}
+expect {
+    0|1
+    1|5
+}
+
+@cross-check-integrity
+test nested-outer-aggregate-empty-input {
+    CREATE TABLE t(a);
+    SELECT coalesce((SELECT (SELECT sum(t.a))), -1) FROM t;
+}
+expect {
+    -1
+}
+
+@cross-check-integrity
+test nested-aggregate-uses-nearest-referenced-query {
+    CREATE TABLE t(a);
+    CREATE TABLE u(b);
+    INSERT INTO t VALUES (1), (2);
+    INSERT INTO u VALUES (10), (20);
+    SELECT a, (SELECT (SELECT sum(u.b + t.a)) FROM u) FROM t ORDER BY a;
+}
+expect {
+    1|32
+    2|34
+}
+
+@cross-check-integrity
+test nested-aggregate-with-local-column-stays-local {
+    CREATE TABLE t(a);
+    CREATE TABLE u(b);
+    INSERT INTO t VALUES (1), (2);
+    INSERT INTO u VALUES (10), (20);
+    SELECT a, (SELECT (SELECT sum(u.b + t.a) FROM u)) FROM t ORDER BY a;
+}
+expect {
+    1|32
+    2|34
+}
+
+@cross-check-integrity
+test nested-aggregate-without-column-stays-local {
+    CREATE TABLE t(a);
+    CREATE TABLE u(b);
+    INSERT INTO t VALUES (1), (2);
+    INSERT INTO u VALUES (10), (20);
+    SELECT a, (SELECT (SELECT count(*) FROM u)) FROM t ORDER BY a;
+}
+expect {
+    1|2
+    2|2
+}
+
+@cross-check-integrity
+test nested-aggregate-skips-unrelated-from {
+    CREATE TABLE t(a);
+    CREATE TABLE u(b);
+    INSERT INTO t VALUES (1), (2), (3);
+    INSERT INTO u VALUES (10), (20);
+    SELECT (SELECT (SELECT sum(t.a)) FROM u) FROM t;
+}
+expect {
+    6
+}
+
+test nested-outer-aggregate-in-where-is-an-error {
+    CREATE TABLE t(a);
+    INSERT INTO t VALUES (1), (2), (3);
+    SELECT * FROM t WHERE (SELECT (SELECT max(t.a))) > 1;
+}
+expect error {
+    misuse of aggregate: max()
+}
+
+@cross-check-integrity
+test nested-identical-local-aggregates-stay-independent {
+    CREATE TABLE t(a);
+    CREATE TABLE u(b);
+    INSERT INTO t VALUES (1), (2), (3);
+    INSERT INTO u VALUES (10), (20);
+    SELECT sum(1), (SELECT (SELECT sum(1) FROM u)) FROM t;
+}
+expect {
+    3|2
+}
+
+test nested-outer-aggregate-in-on-is-an-error {
+    CREATE TABLE t(a);
+    CREATE TABLE u(b);
+    INSERT INTO t VALUES (1), (2), (3);
+    INSERT INTO u VALUES (10), (20);
+    SELECT * FROM t JOIN u ON (SELECT (SELECT max(t.a))) > 1;
+}
+expect error {
+    misuse of aggregate: max()
+}

@@ -241,6 +241,8 @@ pub fn plan_subqueries_from_select_plan(
     resolver: &Resolver,
     connection: &Arc<Connection>,
 ) -> Result<()> {
+    resolver.begin_collecting_aggregates_from_subqueries(&plan.table_references);
+
     // Common-subexpression elimination for scalar subqueries shared by GROUP BY and the SELECT
     // list (e.g. `SELECT (subq) AS rs ... GROUP BY rs`, where the GROUP BY term is a copy of the
     // result column): plan and evaluate the subquery once instead of once per use.
@@ -412,6 +414,8 @@ pub fn plan_subqueries_from_select_plan(
         recollect_aggregates(plan, resolver)?;
     }
 
+    plan.aggregates
+        .extend(resolver.take_aggregates_from_subqueries());
     assign_select_subquery_eval_phases(plan);
     mark_shared_cte_materialization_requirements(
         &mut plan.table_references,
@@ -2071,7 +2075,7 @@ pub fn emit_non_from_clause_subquery(
         let emit_plan = move |program: &mut ProgramBuilder| -> Result<()> {
             match plan {
                 Plan::Select(select_plan) => {
-                    if preserve_outer_expr_cache {
+                    if preserve_outer_expr_cache || is_correlated {
                         emit_program_for_select_with_resolver(
                             program,
                             resolver.fork_with_expr_cache(),
@@ -2257,7 +2261,7 @@ fn assign_select_subquery_eval_phases(plan: &mut SelectPlan) {
         // in the outer query's aggregate-output phase, after that aggregate has
         // been finalized into a register; run earlier, the aggregate expression
         // inside the subquery has no register to read.
-        if subquery_reads_outer_aggregate(subquery) {
+        if subquery_reads_outer_aggregate(subquery, &plan.aggregates) {
             subquery.eval_phase = if has_grouped_output {
                 SubqueryEvalPhase::GroupedOutput
             } else {
@@ -2331,7 +2335,10 @@ fn expr_reads_subquery(expr: &ast::Expr, subquery_ids: &[ast::TableInternalId]) 
 /// Window functions (an aggregate name with an `OVER` clause) are computed by
 /// the subquery itself, not the outer query, so they are not counted here even
 /// though they also do not appear in `aggregates`.
-fn subquery_reads_outer_aggregate(subquery: &NonFromClauseSubquery) -> bool {
+fn subquery_reads_outer_aggregate(
+    subquery: &NonFromClauseSubquery,
+    aggregates: &[Aggregate],
+) -> bool {
     let SubqueryState::Unevaluated { plan: Some(plan) } = &subquery.state else {
         return false;
     };
@@ -2341,19 +2348,19 @@ fn subquery_reads_outer_aggregate(subquery: &NonFromClauseSubquery) -> bool {
     let mut found = false;
     for rc in &select.result_columns {
         let _ = walk_expr(&rc.expr, &mut |e: &ast::Expr| -> Result<WalkControl> {
-            if let ast::Expr::FunctionCall {
-                name,
-                args,
-                filter_over,
-                ..
-            } = e
+            if aggregates.iter().any(|agg| agg.original_expr == *e)
+                && !select.aggregates.iter().any(|agg| agg.original_expr == *e)
             {
-                let is_plain_aggregate = filter_over.over_clause.is_none()
-                    && matches!(
-                        crate::function::Func::resolve_function(name.as_str(), args.len()),
-                        Ok(Some(crate::function::Func::Agg(_)))
-                    );
-                if is_plain_aggregate && !select.aggregates.iter().any(|a| a.original_expr == *e) {
+                found = true;
+                return Ok(WalkControl::SkipChildren);
+            }
+            if let ast::Expr::SubqueryResult { subquery_id, .. } = e {
+                let nested = select
+                    .non_from_clause_subqueries
+                    .iter()
+                    .find(|nested| nested.internal_id == *subquery_id)
+                    .expect("subquery result must have a planned subquery");
+                if subquery_reads_outer_aggregate(nested, aggregates) {
                     found = true;
                     return Ok(WalkControl::SkipChildren);
                 }
