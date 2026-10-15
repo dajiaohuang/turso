@@ -1,3 +1,4 @@
+mod test_materialized_cte_empty_correlated_subquery;
 mod test_window_minmax_collation;
 mod test_having_group_by_predicate;
 mod test_order_by;

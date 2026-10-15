@@ -1288,7 +1288,7 @@ fn pre_materialize_multi_ref_ctes_in_select_plan(
     )
 }
 
-fn pre_materialize_multi_ref_ctes_in_non_from_subqueries(
+pub(super) fn pre_materialize_multi_ref_ctes_in_non_from_subqueries(
     program: &mut ProgramBuilder,
     subqueries: &mut [NonFromClauseSubquery],
     t_ctx: &mut TranslateCtx,

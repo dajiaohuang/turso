@@ -24,6 +24,7 @@ use crate::{
         subquery::{
             emit_from_clause_subqueries, emit_non_from_clause_subqueries_for_eval_at,
             emit_non_from_clause_subqueries_for_phase,
+            pre_materialize_multi_ref_ctes_in_non_from_subqueries,
         },
         values::emit_values,
         window::{emit_window_flush, EmitWindow},
@@ -93,6 +94,13 @@ pub fn emit_query<'a>(
     for variable in &plan.phantom_params {
         program.register_variable(variable);
     }
+
+    // These CTEs need backing cursors before an early subquery can reference them.
+    pre_materialize_multi_ref_ctes_in_non_from_subqueries(
+        program,
+        &mut plan.non_from_clause_subqueries,
+        t_ctx,
+    )?;
 
     // Evaluate uncorrelated subqueries as early as possible, because even LIMIT can reference a subquery.
     // This must happen before VALUES emission since VALUES expressions may contain scalar subqueries.
