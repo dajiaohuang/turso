@@ -103,6 +103,21 @@ fn timediff_normalizes_overflowing_calendar_days() {
 }
 
 #[test]
+fn strftime_returns_null_for_dates_outside_supported_range() {
+    let io = Arc::new(FixedClockIo {
+        inner: MemoryIO::new(),
+        unix_secs: AtomicI64::new(1_000_000_000),
+    });
+    let db = Database::open_file(io, ":memory:", Arc::new(SqliteDialect)).unwrap();
+    let conn = db.connect(ConnectOpts::new()).unwrap();
+
+    let rows: Vec<(i64, i64, i64, i64)> = conn.exec_rows(
+        "SELECT strftime('%Y-%m-%d', 0, '-1 day') IS NULL, strftime('%Y', 1, 'start of year') IS NULL, strftime('%d', 5373484, '+1 day') IS NULL, strftime('x', 0, '-1 day') IS NULL",
+    );
+    assert_eq!(rows, vec![(1, 1, 1, 1)]);
+}
+
+#[test]
 fn current_time_comes_from_the_io_clock() {
     let io = Arc::new(FixedClockIo {
         inner: MemoryIO::new(),
