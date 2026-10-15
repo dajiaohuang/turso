@@ -637,7 +637,15 @@ fn allocate_window_minmax(
                 continue;
             }
         };
-        let Expr::FunctionCall { args, .. } = func.current_expr() else {
+        let collation_expr = window
+            .functions
+            .iter()
+            .find(|candidate| {
+                candidate.rewritten.is_some()
+                    && exprs_are_equivalent(&candidate.original_expr, &func.original_expr)
+            })
+            .map_or_else(|| func.current_expr(), WindowFunction::current_expr);
+        let Expr::FunctionCall { args, .. } = collation_expr else {
             unreachable!("min/max window calls must have one argument");
         };
         let arg = args
