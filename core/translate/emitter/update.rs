@@ -1359,24 +1359,7 @@ fn emit_update_insns<'a>(
     // This must happen before index operations and triggers so that all operations
     // use the converted values.
     if let Some(btree_table) = target_table.table.btree() {
-        if !btree_table.is_strict {
-            let affinity = btree_table
-                .columns()
-                .iter()
-                .filter(|c| !c.is_virtual_generated())
-                .map(|c| c.affinity());
-
-            // Only emit Affinity if there's meaningful affinity to apply
-            if affinity.clone().any(|a| a != Affinity::Blob) {
-                if let Ok(count) = NonZeroUsize::try_from(layout.num_non_virtual_cols()) {
-                    program.emit_insn(Insn::Affinity {
-                        start_reg: start,
-                        count,
-                        affinities: affinity.map(|a| a.aff_mask()).collect(),
-                    });
-                }
-            }
-        }
+        emit_update_column_affinity(program, &btree_table, &layout, start);
     }
 
     // Fire BEFORE UPDATE triggers and preserve old_registers for AFTER triggers
@@ -1532,6 +1515,10 @@ fn emit_update_insns<'a>(
             skip_row_label,
             false,
         )?;
+
+        if let Some(btree_table) = target_table.table.btree() {
+            emit_update_column_affinity(program, &btree_table, &layout, start);
+        }
 
         // Now emit NOT NULL checks for SET clause columns that were deferred
         // from the first emit_update_column_values call. In SQLite, NOT NULL
@@ -2696,4 +2683,31 @@ fn emit_update_insns<'a>(
     t_ctx.resolver.register_affinities.clear();
     t_ctx.resolver.register_collations.clear();
     Ok(())
+}
+
+fn emit_update_column_affinity(
+    program: &mut ProgramBuilder,
+    btree_table: &BTreeTable,
+    layout: &ColumnLayout,
+    start: usize,
+) {
+    if btree_table.is_strict {
+        return;
+    }
+
+    let affinity = btree_table
+        .columns()
+        .iter()
+        .filter(|column| !column.is_virtual_generated())
+        .map(|column| column.affinity());
+
+    if affinity.clone().any(|affinity| affinity != Affinity::Blob) {
+        if let Ok(count) = NonZeroUsize::try_from(layout.num_non_virtual_cols()) {
+            program.emit_insn(Insn::Affinity {
+                start_reg: start,
+                count,
+                affinities: affinity.map(|affinity| affinity.aff_mask()).collect(),
+            });
+        }
+    }
 }

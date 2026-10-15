@@ -2,6 +2,29 @@ use crate::common::{do_flush, ExecRows, TempDatabase};
 use asserting::expectations::{any, StringContains};
 use asserting::prelude::*;
 
+#[test]
+fn test_before_update_trigger_preserves_real_affinity_from_sqlite_file() {
+    let db = TempDatabase::new_with_rusqlite("CREATE TABLE t(a REAL, b);");
+    let sqlite = rusqlite::Connection::open(&db.path).unwrap();
+    sqlite
+        .execute_batch(
+            "INSERT INTO t VALUES (128.0, 1); \
+             CREATE INDEX i ON t(typeof(a), b); \
+             CREATE TRIGGER g BEFORE UPDATE ON t BEGIN SELECT 1; END;",
+        )
+        .unwrap();
+    drop(sqlite);
+    let conn = db.connect_limbo();
+
+    conn.execute("UPDATE t SET b = 2").unwrap();
+    let integrity: Vec<(String,)> = conn.exec_rows("PRAGMA integrity_check");
+    assert_eq!(integrity, vec![("ok".to_string(),)]);
+    conn.execute("UPDATE t SET b = 3").unwrap();
+
+    let rows: Vec<(f64, i64)> = conn.exec_rows("SELECT a, b FROM t");
+    assert_eq!(rows, vec![(128.0, 3)]);
+}
+
 #[turso_macros::test(mvcc)]
 fn test_create_trigger(db: TempDatabase) {
     let _ = tracing_subscriber::fmt()
