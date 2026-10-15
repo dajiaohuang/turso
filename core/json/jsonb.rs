@@ -604,6 +604,12 @@ impl PathOperation for InsertOperation {
             LimboError::InternalError("stack should not be empty after check".to_string())
         })?;
 
+        if self.mode == PathOperationMode::InsertNew
+            && target.field_key_index == JsonLocationKind::DocumentRoot
+        {
+            return Ok(());
+        }
+
         // handle array
         if target.has_specific_index() {
             let array_value_idx = target.get_array_index().ok_or_else(|| {
