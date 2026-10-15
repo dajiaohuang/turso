@@ -2362,6 +2362,113 @@ fn test_concurrent_autoincrement_no_database_busy(tmp_db: TempDatabase) {
     );
 }
 
+#[test]
+fn test_autoincrement_inner_commit_busy_preserves_outer_transaction() {
+    for (trigger, release_on_busy, timeout) in [
+        (false, true, false),
+        (false, true, true),
+        (true, true, true),
+        (false, false, true),
+        (true, false, true),
+    ] {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("inner_commit_busy.db");
+        {
+            let tmp_db = TempDatabase::builder()
+                .with_db_path(&path)
+                .with_mvcc(true)
+                .build();
+            let writer = tmp_db.connect_limbo();
+            writer.execute("CREATE TABLE p (v TEXT)").unwrap();
+            writer
+                .execute("CREATE TABLE s (id INTEGER PRIMARY KEY AUTOINCREMENT, v INTEGER)")
+                .unwrap();
+            writer.execute("CREATE TABLE q (v INTEGER)").unwrap();
+            writer.execute("CREATE TRIGGER q_ins AFTER INSERT ON q BEGIN INSERT INTO s (v) VALUES (new.v); END").unwrap();
+            if timeout {
+                writer.set_busy_timeout(Duration::from_millis(50));
+            }
+            let blocker = tmp_db.connect_limbo();
+            blocker.execute("BEGIN IMMEDIATE").unwrap();
+            blocker.execute("INSERT INTO p VALUES ('blocker')").unwrap();
+            writer.execute("BEGIN CONCURRENT").unwrap();
+            writer.execute("INSERT INTO p VALUES ('outer')").unwrap();
+            let sql = if trigger {
+                "INSERT INTO q VALUES (1)"
+            } else {
+                "INSERT INTO s (v) VALUES (1)"
+            };
+            let mut insert = writer.prepare(sql).unwrap();
+            let mut blocker_committed = false;
+            let mut saw_busy = false;
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let result = loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "insert never completed"
+                );
+                match insert.step() {
+                    Ok(StepResult::IO | StepResult::Yield) => tmp_db.io.step().unwrap(),
+                    Ok(StepResult::Sleep { .. } | StepResult::Busy)
+                        if release_on_busy && !blocker_committed =>
+                    {
+                        saw_busy = true;
+                        blocker.execute("COMMIT").unwrap();
+                        blocker_committed = true;
+                    }
+                    Ok(StepResult::Sleep { duration }) => {
+                        saw_busy = true;
+                        std::thread::sleep(duration);
+                    }
+                    Ok(StepResult::Busy) => {
+                        saw_busy = true;
+                        break Err(LimboError::Busy);
+                    }
+                    Ok(StepResult::Done) => break Ok(()),
+                    Ok(step) => panic!("unexpected insert step: {step:?}"),
+                    Err(error) => break Err(error),
+                }
+            };
+            drop(insert);
+            assert!(saw_busy);
+            if release_on_busy {
+                assert!(blocker_committed);
+                assert!(result.is_ok(), "insert after lock release: {result:?}");
+            } else {
+                assert!(
+                    matches!(result, Err(LimboError::Busy)),
+                    "insert with lock held: {result:?}"
+                );
+                blocker.execute("COMMIT").unwrap();
+            }
+            writer
+                .execute("ROLLBACK")
+                .expect("outer transaction must remain rollbackable");
+            let rows: Vec<(String,)> = writer.exec_rows("SELECT v FROM p ORDER BY v");
+            assert_eq!(rows, vec![("blocker".to_owned(),)]);
+            let rows: Vec<(i64,)> =
+                writer.exec_rows("SELECT (SELECT count(*) FROM s) + (SELECT count(*) FROM q)");
+            assert_eq!(rows, vec![(0,)]);
+            writer.close().unwrap();
+            blocker.close().unwrap();
+        }
+        let reopened = TempDatabase::builder()
+            .with_db_path(&path)
+            .with_mvcc(true)
+            .build();
+        let reader = reopened.connect_limbo();
+        let rows: Vec<(String,)> = reader.exec_rows("SELECT v FROM p ORDER BY v");
+        assert_eq!(rows, vec![("blocker".to_owned(),)]);
+        let rows: Vec<(i64,)> =
+            reader.exec_rows("SELECT (SELECT count(*) FROM s) + (SELECT count(*) FROM q)");
+        assert_eq!(rows, vec![(0,)]);
+        reader.execute("INSERT INTO s(v) VALUES (9)").unwrap();
+        let rows: Vec<(i64,)> = reader.exec_rows("SELECT v FROM s");
+        assert_eq!(rows, vec![(9,)]);
+        reader.close().unwrap();
+    }
+}
+
 /// BEGIN IMMEDIATE emits a write Transaction for temp, but must not create the
 /// per-connection temp database just to lock it (SQLite treats it as a no-op
 /// while temp is not open). Creating it costs a temp file and an fsync on

@@ -14937,6 +14937,7 @@ pub fn op_sequence_commit_inner_tx(
             state.pc += 1;
             Ok(InsnFunctionStepResult::Step)
         }
+        Err(err) if matches!(*err, LimboError::Busy) => Err(err),
         Err(err)
             if matches!(
                 *err,
@@ -14968,18 +14969,16 @@ pub fn op_sequence_commit_inner_tx(
                 .connection
                 .sequence_inner_retries
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if state.sequence_inner_retry_count > SEQUENCE_INNER_TX_RETRY_BUDGET {
-                state.sequence_inner_retry_count = 0;
-                let _ = err;
-                return Err(LimboError::Busy.into());
-            }
             // Re-export the specific class via the status register —
             // the translator-emitted retry uses it to decide whether
             // to jump back.
-            let _ = err;
             state.registers[*status_reg]
                 .set_value(Value::from_i64(SEQ_COMMIT_STATUS_CONFLICT_RETRY));
             state.pc += 1;
+            if state.sequence_inner_retry_count > SEQUENCE_INNER_TX_RETRY_BUDGET {
+                state.sequence_inner_retry_count = 0;
+                return Err(LimboError::Busy.into());
+            }
             Ok(InsnFunctionStepResult::Step)
         }
         Err(e) => {
