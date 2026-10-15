@@ -16,7 +16,6 @@ use crate::{
     types::{Value, ValueType},
     LimboError, OpenFlags, Result, Statement, SymbolTable,
 };
-use either::Either;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::future::Future;
 use tracing::{instrument, Level};
@@ -323,24 +322,22 @@ pub fn parse_schema_rows(
 }
 
 fn cmp_numeric_strings(num_str: &str, other: &str) -> bool {
-    fn parse(s: &str) -> Option<Either<i64, f64>> {
-        if let Ok(i) = s.parse::<i64>() {
-            Some(Either::Left(i))
-        } else if let Ok(f) = s.parse::<f64>() {
-            Some(Either::Right(f))
-        } else {
-            None
-        }
+    fn is_integer(s: &str) -> bool {
+        !s.contains(['.', 'e', 'E'])
     }
 
-    match (parse(num_str), parse(other)) {
-        (Some(Either::Left(i1)), Some(Either::Left(i2))) => i1 == i2,
-        (Some(Either::Right(f1)), Some(Either::Right(f2))) => f1 == f2,
+    match (is_integer(num_str), is_integer(other)) {
+        (true, true) => match (num_str.parse::<i128>(), other.parse::<i128>()) {
+            (Ok(i1), Ok(i2)) => i1 == i2,
+            _ => num_str == other,
+        },
+        (false, false) => match (num_str.parse::<f64>(), other.parse::<f64>()) {
+            (Ok(f1), Ok(f2)) => f1 == f2,
+            _ => num_str == other,
+        },
         // Integer and Float are NOT equivalent even if values match,
         // because result type of operations depends on operand types
-        (Some(Either::Left(_)), Some(Either::Right(_)))
-        | (Some(Either::Right(_)), Some(Either::Left(_))) => false,
-        _ => num_str == other,
+        _ => false,
     }
 }
 
