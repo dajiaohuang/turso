@@ -55,6 +55,32 @@ impl IO for FixedClockIo {
 }
 
 #[test]
+fn hour_24_time_modifiers_do_not_shift_the_date() {
+    let io = Arc::new(FixedClockIo {
+        inner: MemoryIO::new(),
+        unix_secs: AtomicI64::new(1_000_000_000),
+    });
+    let db = Database::open_file(io, ":memory:", Arc::new(SqliteDialect)).unwrap();
+    let conn = db.connect(ConnectOpts::new()).unwrap();
+
+    let rows: Vec<(String, i64, String, String)> = conn.exec_rows(
+        "SELECT datetime('2024-01-01 10:00', '+24:00'), \
+         unixepoch('2024-01-01', '+24:00'), \
+         datetime('2024-01-01 10:00', '-24:00'), \
+         datetime('2024-01-01 10:00', '+23:59')",
+    );
+    assert_eq!(
+        rows,
+        vec![(
+            "2024-01-01 10:00:00".to_string(),
+            1_704_067_200,
+            "2024-01-01 10:00:00".to_string(),
+            "2024-01-02 09:59:00".to_string(),
+        )]
+    );
+}
+
+#[test]
 fn current_time_comes_from_the_io_clock() {
     let io = Arc::new(FixedClockIo {
         inner: MemoryIO::new(),

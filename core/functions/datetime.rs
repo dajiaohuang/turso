@@ -743,7 +743,8 @@ fn parse_arithmetic_modifier(p: &mut DateTime, z: &str) -> Result<()> {
         };
         if parse_hh_mm_ss(time_str, &mut tx) {
             tx.compute_jd();
-            let ms = (tx.h as i64 * 3600000) + (tx.min as i64 * 60000) + (tx.s * 1000.0) as i64;
+            let ms = ((tx.h as i64 * 3600000) + (tx.min as i64 * 60000) + (tx.s * 1000.0) as i64)
+                % JD_TO_MS;
             p.compute_jd();
             p.i_jd = p.i_jd.wrapping_add((sign as i64).wrapping_mul(ms));
             p.clear_ymd_hms_tz();
