@@ -1,3 +1,4 @@
+mod test_having_group_by_predicate;
 mod test_order_by;
 mod test_delete_returning_row_image;
 mod test_alter_table_reopen;
