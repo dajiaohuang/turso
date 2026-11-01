@@ -1,5 +1,14 @@
 @database :memory:
 
+test jsonb-patch-root-short-replacement {
+    SELECT hex(jsonb_patch('[1,2,3]', '"plain"')),
+           hex(jsonb_patch('"xy"', '"x"')),
+           hex(jsonb_patch('[1]', '5'));
+}
+expect {
+    C705706C61696E|C70178|C30135
+}
+
 test jsonb-edit-short-shrink {
     SELECT hex(jsonb_patch('{"a":"xy"}','{"a":"x"}')),
         hex(jsonb_replace('{"a":"xy"}','$.a','x')),

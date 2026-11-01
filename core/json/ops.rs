@@ -56,14 +56,7 @@ pub fn jsonb_patch(
     let make_jsonb = curry_convert_dbtype_to_jsonb(Conv::Strict);
     let patch = cache.get_or_insert_with(patch, make_jsonb)?;
 
-    if patch.element_type()? != super::jsonb::ElementType::OBJECT {
-        target = patch;
-    } else {
-        if target.element_type()? != super::jsonb::ElementType::OBJECT {
-            target = super::jsonb::Jsonb::make_empty_obj(0)?;
-        }
-        target.patch(&patch)?;
-    }
+    target.patch(&patch)?;
 
     let element_type = target.element_type()?;
 
