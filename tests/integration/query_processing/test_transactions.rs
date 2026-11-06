@@ -2037,6 +2037,38 @@ fn insert_after_database_full(tmp_db: &TempDatabase, begin: &str, end: &str) {
 }
 
 #[turso_macros::test]
+fn test_strict_datatype_or_fail_autocommit_rolls_back(tmp_db: TempDatabase) {
+    let conn = tmp_db.connect_limbo();
+    conn.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, u INT UNIQUE, k INT) STRICT")
+        .unwrap();
+    conn.execute("INSERT INTO t VALUES(1,1,0)").unwrap();
+    let error = conn
+        .execute("INSERT OR FAIL INTO t VALUES(10,5,5),(11,6,'abc')")
+        .unwrap_err();
+    assert!(matches!(error, LimboError::Constraint(_)), "{error:?}");
+    let rows = helper_read_all_rows(conn.query("SELECT id FROM t ORDER BY id").unwrap().unwrap());
+    assert_eq!(rows, vec![vec![Value::from_i64(1)]]);
+}
+
+#[turso_macros::test]
+fn test_strict_datatype_or_fail_explicit_keeps_prior_rows(tmp_db: TempDatabase) {
+    let conn = tmp_db.connect_limbo();
+    conn.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, u INT UNIQUE, k INT) STRICT")
+        .unwrap();
+    conn.execute("INSERT INTO t VALUES(1,1,0)").unwrap();
+    conn.execute("BEGIN").unwrap();
+    assert!(conn
+        .execute("INSERT OR FAIL INTO t VALUES(10,5,5),(11,6,'abc')")
+        .is_err());
+    conn.execute("COMMIT").unwrap();
+    let rows = helper_read_all_rows(conn.query("SELECT id FROM t ORDER BY id").unwrap().unwrap());
+    assert_eq!(
+        rows,
+        vec![vec![Value::from_i64(1)], vec![Value::from_i64(10)]]
+    );
+}
+
+#[turso_macros::test]
 /// INSERT OR FAIL should keep changes made by the statement before the error.
 /// Unlike ABORT (the default), FAIL does not roll back successful inserts within the same statement.
 fn test_insert_or_fail_keeps_prior_changes(tmp_db: TempDatabase) {

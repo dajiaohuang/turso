@@ -2965,7 +2965,21 @@ impl Program {
         pager: &Arc<Pager>,
         err: LimboError,
     ) -> Option<ProgramStep> {
-        match err.into_structured_constraint() {
+        let err = err.into_structured_constraint();
+        // SQLite rolls back an implicit transaction on a STRICT datatype error,
+        // even when the statement uses OR FAIL. In an explicit transaction it
+        // retains earlier rows, as ordinary FAIL does.
+        if self.resolve_type == ResolveType::Fail
+            && self.connection.auto_commit.load(Ordering::SeqCst)
+            && matches!(&err, LimboError::ConstraintViolation(v) if v.kind == crate::error::ConstraintKind::Datatype)
+        {
+            let rollback_error = LimboError::Raise(ResolveType::Abort, Box::new(err.clone()));
+            if let Err(abort_err) = self.abort(pager, Some(&rollback_error), state, true) {
+                tracing::error!("Abort failed during error handling: {abort_err}");
+            }
+            return Some(ProgramStep::Error(err.into()));
+        }
+        match err {
             LimboError::Busy => Some(ProgramStep::Busy),
             LimboError::BusySnapshot
                 if matches!(
