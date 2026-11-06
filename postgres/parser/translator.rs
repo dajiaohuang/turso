@@ -1876,7 +1876,7 @@ impl PostgreSQLTranslator {
                 select: ast::OneSelect::Values(rows),
                 compounds: vec![],
             };
-            let order_by = self.translate_order_by(&select.sort_clause)?;
+            let order_by = self.translate_select_order_by(&select.sort_clause)?;
             let limit = self.translate_select_limit(select)?;
             let with = self.translate_with_clause(&select.with_clause)?;
             return Ok(ast::Select {
@@ -1909,7 +1909,7 @@ impl PostgreSQLTranslator {
             None
         };
 
-        let order_by = self.translate_order_by(&select.sort_clause)?;
+        let order_by = self.translate_select_order_by(&select.sort_clause)?;
 
         let distinctness = translate_distinct_clause(&select.distinct_clause)?;
 
@@ -1994,7 +1994,7 @@ impl PostgreSQLTranslator {
             })
             .collect::<Result<Vec<_>, ParseError>>()?;
 
-        let order_by = self.translate_order_by(&select.sort_clause)?;
+        let order_by = self.translate_select_order_by(&select.sort_clause)?;
         let limit = self.translate_select_limit(select)?;
         let with = self.translate_with_clause(&select.with_clause)?;
 
@@ -4748,6 +4748,29 @@ impl PostgreSQLTranslator {
             do_clause,
             next: None,
         })))
+    }
+
+    fn translate_select_order_by(
+        &self,
+        sort_clause: &[pg_query::protobuf::Node],
+    ) -> Result<Vec<ast::SortedColumn>, ParseError> {
+        use pg_query::protobuf::{a_const::Val, node::Node};
+
+        for node in sort_clause {
+            if let Some(Node::SortBy(sort)) = &node.node {
+                if let Some(Node::AConst(constant)) =
+                    sort.node.as_ref().and_then(|node| node.node.as_ref())
+                {
+                    if constant.isnull || !matches!(constant.val, Some(Val::Ival(_))) {
+                        return Err(ParseError::Sqlstate {
+                            sqlstate: crate::sqlstate::SQLSTATE_SYNTAX_ERROR,
+                            message: "non-integer constant in ORDER BY".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        self.translate_order_by(sort_clause)
     }
 
     fn translate_order_by(

@@ -5,6 +5,67 @@
 
 @database :memory:
 
+test order-by-noninteger-float-constant {
+    SELECT 1 AS x ORDER BY 1.0;
+}
+@sqlstate 42601
+expect error {
+    non-integer constant in ORDER BY
+}
+
+test order-by-noninteger-values {
+    VALUES (1) ORDER BY 1.0;
+}
+@sqlstate 42601
+expect error {
+    non-integer constant in ORDER BY
+}
+
+test order-by-noninteger-compound {
+    SELECT 1 UNION SELECT 2 ORDER BY (1.0);
+}
+@sqlstate 42601
+expect error {
+    non-integer constant in ORDER BY
+}
+
+test order-by-noninteger-null-constant {
+    SELECT 1 AS x ORDER BY NULL;
+}
+@sqlstate 42601
+expect error {
+    non-integer constant in ORDER BY
+}
+
+test order-by-noninteger-string-constant {
+    SELECT 1 AS x ORDER BY 'x';
+}
+@sqlstate 42601
+expect error {
+    non-integer constant in ORDER BY
+}
+
+test order-by-noninteger-bool-constant {
+    SELECT 1 AS x ORDER BY true;
+}
+@sqlstate 42601
+expect error {
+    non-integer constant in ORDER BY
+}
+
+test order-by-nonliteral-expression {
+    SELECT 1 AS x ORDER BY 1.0 + 0;
+    SELECT 1 AS x ORDER BY 1;
+    SELECT row_number() OVER (ORDER BY 1.0);
+    SELECT string_agg(x::text, ',' ORDER BY 1.0) FROM (VALUES (1), (2)) AS v(x);
+}
+expect {
+    1
+    1
+    1
+    1,2
+}
+
 test order-by-using-builtin-operators {
     CREATE TABLE order_using_values (x int);
     INSERT INTO order_using_values VALUES (1), (NULL), (2);
