@@ -506,12 +506,7 @@ fn update_pragma(
             program,
         ),
         PragmaName::MaxPageCount => {
-            let data = parse_signed_number(&value)?;
-            let max_page_count_value = match data {
-                Value::Numeric(Numeric::Integer(i)) => i as usize,
-                Value::Numeric(Numeric::Float(f)) => f64::from(f) as usize,
-                _ => unreachable!(),
-            };
+            let max_page_count_value = pragma_max_page_count_value(&value);
 
             let result_reg = program.alloc_register();
             program.emit_insn(Insn::MaxPgcnt {
@@ -2089,6 +2084,35 @@ fn emit_columns_for_table_info(
 
         program.emit_result_row(base_reg, 6 + if extended { 1 } else { 0 });
     }
+}
+
+/// SQLite accepts a complete signed decimal or hexadecimal integer here.
+/// Invalid and nonpositive values leave the existing page limit unchanged.
+fn pragma_max_page_count_value(expr: &ast::Expr) -> usize {
+    let (negative, literal) = match expr {
+        Expr::Unary(ast::UnaryOperator::Negative, inner) => (true, inner.as_ref()),
+        Expr::Unary(ast::UnaryOperator::Positive, inner) => (false, inner.as_ref()),
+        literal => (false, literal),
+    };
+    let text = match literal {
+        Expr::Literal(Literal::Numeric(text)) => text.as_str(),
+        Expr::Literal(Literal::String(text)) => text.trim_matches('\''),
+        Expr::Name(name) | Expr::Id(name) => name.as_str(),
+        _ => return 0,
+    };
+    let text = text.trim();
+    if negative || text.starts_with('-') {
+        return 0;
+    }
+    let text = text.strip_prefix('+').unwrap_or(text);
+    let parsed = if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).ok().map(|value| value as i64)
+    } else {
+        text.parse::<i64>().ok()
+    };
+    parsed
+        .filter(|value| *value > 0)
+        .map_or(0, |value| value.min(0xffff_fffe) as usize)
 }
 
 /// Reads the value of an integer PRAGMA the way SQLite's `sqlite3Atoi` does:
