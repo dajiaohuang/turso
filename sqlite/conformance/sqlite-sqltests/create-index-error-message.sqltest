@@ -195,3 +195,73 @@ test create-index-qualified-column-before-unknown-column {
 expect error {
     the "." operator prohibited in index expressions
 }
+
+# Error ordering for qualified names in index terms and constraints.
+test create-index-unknown-function-with-qualified-column {
+    CREATE TABLE t (a, b);
+    CREATE INDEX idx ON t (foo(t.a));
+}
+expect error {
+    the "." operator prohibited in index expressions
+}
+
+test create-index-qualified-column-with-unknown-collation {
+    CREATE TABLE t (a, b);
+    CREATE INDEX idx ON t (t.a COLLATE x);
+}
+expect error {
+    the "." operator prohibited in index expressions
+}
+
+test create-partial-index-unknown-qualifier {
+    CREATE TABLE t (a, b);
+    CREATE INDEX idx ON t (a) WHERE x.a > 0;
+}
+expect error {
+    no such column: x.a
+}
+
+test create-partial-index-subquery-before-unknown-qualifier {
+    CREATE TABLE t (a, b);
+    CREATE INDEX idx ON t (a) WHERE (SELECT 1) + x.a;
+}
+expect error {
+    subqueries prohibited in partial index WHERE clauses
+}
+
+test unique-constraint-qualified-column {
+    CREATE TABLE t2 (a, UNIQUE(t2.a));
+}
+expect error {
+    the "." operator prohibited in index expressions
+}
+
+test create-index-random-before-qualified-column {
+    CREATE TABLE t (a, b);
+    CREATE INDEX idx ON t (random() + t.a);
+}
+expect error {
+    the "." operator prohibited in index expressions
+}
+
+test create-index-qualified-column-before-missing-column {
+    CREATE TABLE t (a, b);
+    CREATE INDEX idx ON t (t.a + missing);
+}
+expect error {
+    no such column: missing
+}
+
+test unique-constraint-missing-qualified-column {
+    CREATE TABLE t2 (a, UNIQUE(t2.missing));
+}
+expect error {
+    no such column: t2.missing
+}
+
+test unique-constraint-function-with-qualified-column {
+    CREATE TABLE t2 (a, UNIQUE(foo(t2.a)));
+}
+expect error {
+    the "." operator prohibited in index expressions
+}

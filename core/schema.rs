@@ -6742,6 +6742,69 @@ fn constraint_column_collation(expr: &Expr) -> Result<(&Expr, Option<TextCollati
     }
 }
 
+fn reject_qualified_constraint_expr(
+    expr: &Expr,
+    table: &str,
+    body: &CreateTableBody,
+) -> Result<()> {
+    let CreateTableBody::ColumnsAndConstraints { columns, .. } = body else {
+        return Ok(());
+    };
+    let has_column = |name: &str| {
+        columns
+            .iter()
+            .any(|col| col.col_name.as_str().eq_ignore_ascii_case(name))
+    };
+    let mut has_qualified = false;
+    walk_expr(expr, &mut |e| {
+        if let Expr::Qualified(qualifier, name) = e {
+            if !qualifier.as_str().eq_ignore_ascii_case(table) || !has_column(name.as_str()) {
+                bail_parse_error!("no such column: {}.{}", qualifier.as_str(), name.as_str());
+            }
+            has_qualified = true;
+        }
+        Ok(WalkControl::Continue)
+    })?;
+    if !has_qualified {
+        return Ok(());
+    }
+    let mut last_qualified = false;
+    let mut forbidden = false;
+    walk_expr(expr, &mut |e| {
+        match e {
+            Expr::Id(name) | Expr::Name(name) if !has_column(name.as_str()) => {
+                bail_parse_error!("no such column: {}", name.as_str());
+            }
+            Expr::Qualified(..) => last_qualified = true,
+            Expr::FunctionCall {
+                name,
+                args,
+                filter_over,
+                ..
+            } => {
+                let function = Func::resolve_function(&normalize_ident(name.as_str()), args.len());
+                if filter_over.over_clause.is_some()
+                    || !function.is_ok_and(|f| {
+                        f.is_some_and(|f| is_deterministic_schema_function_call(&f, args))
+                    })
+                {
+                    last_qualified = false;
+                }
+            }
+            Expr::Variable(_) | Expr::Subquery(_) | Expr::Exists(_) | Expr::InSelect { .. } => {
+                forbidden = true;
+                return Ok(WalkControl::SkipChildren);
+            }
+            _ => {}
+        }
+        Ok(WalkControl::Continue)
+    })?;
+    if last_qualified && !forbidden {
+        bail_parse_error!("the \".\" operator prohibited in index expressions");
+    }
+    Ok(())
+}
+
 /// `supports_namespaces` says whether the database supports namespaces, so that
 /// a foreign key may name the mangled name of a table of one.
 pub fn create_table(
@@ -6840,6 +6903,7 @@ pub fn create_table(
                     let mut unique_columns = Vec::try_with_capacity_ext(columns.len())?;
                     for column in columns {
                         let (expr, collation) = constraint_column_collation(column.expr.as_ref())?;
+                        reject_qualified_constraint_expr(expr, tbl_name, body)?;
                         let col_name = match expr {
                             Expr::Id(id) => id.as_str().to_string(),
                             Expr::Literal(Literal::True) => "true".to_owned(),

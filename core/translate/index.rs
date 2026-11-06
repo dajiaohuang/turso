@@ -296,6 +296,25 @@ pub fn translate_create_index(
     });
 
     if !idx.validate_where_expr(&table, resolver) {
+        if let Some(expr) = where_clause.as_ref() {
+            let mut has_subquery = false;
+            walk_expr(expr, &mut |e| {
+                if matches!(
+                    e,
+                    Expr::Exists(_) | Expr::InSelect { .. } | Expr::Subquery(_)
+                ) {
+                    has_subquery = true;
+                    return Ok(WalkControl::SkipChildren);
+                }
+                Ok(WalkControl::Continue)
+            })?;
+            if has_subquery {
+                bail_parse_error!("subqueries prohibited in partial index WHERE clauses");
+            }
+            // Qualifiers in partial-index predicates are allowed, but they
+            // must still resolve to a column of the indexed table.
+            has_qualified_columns(expr, &tbl, &db_name)?;
+        }
         crate::bail_parse_error!(
             "Error: cannot use aggregate, window functions or reference other tables in WHERE clause of CREATE INDEX:\n {}",
             where_clause
@@ -1064,6 +1083,9 @@ fn resolve_sorted_columns_with_catalog(
             Some(db_name) => has_qualified_columns(&sc.expr, table, db_name)?,
             None => false,
         };
+        if has_qualified_column && qualified_column_is_last_error(&sc.expr, table)? {
+            crate::bail_parse_error!("the \".\" operator prohibited in index expressions");
+        }
         let order = sc.order.unwrap_or(SortOrder::Asc);
         let nulls = sc.nulls;
         let (explicit_collation, base_expr) = extract_collation(sc.expr.as_ref(), resolver)?;
@@ -1144,6 +1166,65 @@ fn has_qualified_columns(expr: &Expr, table: &BTreeTable, db_name: &str) -> crat
         Ok(WalkControl::Continue)
     })?;
     Ok(has_qualified_column)
+}
+
+/// SQLite resolves names before reporting schema-expression restrictions.
+/// Among those restrictions the last visited invalid construct determines the
+/// diagnostic, so a qualified name inside an unknown function can take
+/// precedence over the function error.
+fn qualified_column_is_last_error(expr: &Expr, table: &BTreeTable) -> crate::Result<bool> {
+    let mut forbidden = false;
+    walk_expr(expr, &mut |e| {
+        if matches!(
+            e,
+            Expr::Exists(_) | Expr::InSelect { .. } | Expr::Subquery(_) | Expr::Variable(_)
+        ) {
+            forbidden = true;
+            return Ok(WalkControl::SkipChildren);
+        }
+        Ok(WalkControl::Continue)
+    })?;
+    if forbidden {
+        return Ok(false);
+    }
+    let mut names = expr.clone();
+    crate::schema::resolve_gencol_expr_columns(&mut names, table.columns())?;
+    let mut last_is_qualified = false;
+    walk_expr(expr, &mut |e| {
+        match e {
+            Expr::Qualified(..) | Expr::DoublyQualified(..) => last_is_qualified = true,
+            Expr::FunctionCall {
+                name,
+                args,
+                filter_over,
+                ..
+            } => {
+                let function = Func::resolve_function(&normalize_ident(name.as_str()), args.len());
+                if filter_over.over_clause.is_some()
+                    || !function.is_ok_and(|f| {
+                        f.is_some_and(|f| is_deterministic_schema_function_call(&f, args))
+                    })
+                {
+                    last_is_qualified = false;
+                }
+            }
+            Expr::FunctionCallStar { .. }
+            | Expr::Exists(_)
+            | Expr::InSelect { .. }
+            | Expr::Subquery(_)
+            | Expr::Raise { .. }
+            | Expr::Variable(_)
+            | Expr::Literal(
+                ast::Literal::CurrentDate
+                | ast::Literal::CurrentTime
+                | ast::Literal::CurrentTimestamp,
+            ) => last_is_qualified = false,
+            Expr::Collate(..) => last_is_qualified = false,
+            _ => {}
+        }
+        Ok(WalkControl::Continue)
+    })?;
+    Ok(last_is_qualified)
 }
 
 /// The order of the type of an index expression over `table`'s columns, such
