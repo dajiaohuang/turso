@@ -196,7 +196,7 @@ impl SimpleQueryHandler for TursoPgHandler {
                 responses.push(execute_non_query(&mut stmt, &parsed)?);
             } else {
                 let header = Arc::new(build_field_info(&stmt, &Format::UnifiedText));
-                responses.push(execute_query(&mut stmt, header)?);
+                responses.push(execute_query(&mut stmt, header, &parsed)?);
             }
         }
 
@@ -357,7 +357,7 @@ impl ExtendedQueryHandler for TursoPgHandler {
         }
 
         let header = Arc::new(build_field_info(&stmt, &portal.result_column_format));
-        execute_query(&mut stmt, header)
+        execute_query(&mut stmt, header, &parsed)
     }
 
     async fn do_describe_statement<C>(
@@ -513,6 +513,7 @@ fn scalar_pg_type_to_array_type(scalar: &Type) -> Type {
 fn execute_query(
     stmt: &mut turso_pg::Statement,
     header: Arc<Vec<FieldInfo>>,
+    parsed: &ParseResult,
 ) -> PgWireResult<Response> {
     let mut rows: Vec<PgWireResult<DataRow>> = Vec::new();
     let header_clone = header.clone();
@@ -532,7 +533,16 @@ fn execute_query(
     .map_err(pg_error)?;
 
     let data_stream = stream::iter(rows);
-    Ok(Response::Query(QueryResponse::new(header, data_stream)))
+    let mut response = QueryResponse::new(header, data_stream);
+    // pgwire appends the number of returned rows to this prefix. INSERT's
+    // protocol tag also contains the obsolete, always-zero OID field.
+    match CommandTag::of(parsed) {
+        CommandTag::Insert => response.set_command_tag("INSERT 0"),
+        CommandTag::Update => response.set_command_tag("UPDATE"),
+        CommandTag::Delete => response.set_command_tag("DELETE"),
+        _ => {}
+    }
+    Ok(Response::Query(response))
 }
 
 /// Execute a non-SELECT statement and build an Execution response.
@@ -1190,6 +1200,23 @@ mod tests {
             if done {
                 return messages;
             }
+        }
+    }
+
+    #[test]
+    fn returning_rows_keep_dml_command_tags() {
+        let (mut client, _) = copy_test_client();
+        query_messages(&mut client, "CREATE TABLE t(x int)");
+        for (sql, expected) in [
+            ("INSERT INTO t VALUES (1),(2) RETURNING x", "INSERT 0 2"),
+            ("UPDATE t SET x=x+10 RETURNING x", "UPDATE 2"),
+            ("DELETE FROM t WHERE x=11 RETURNING x", "DELETE 1"),
+            ("DELETE FROM t WHERE x=999 RETURNING x", "DELETE 0"),
+            ("SELECT * FROM t", "SELECT 1"),
+        ] {
+            let messages = query_messages(&mut client, sql);
+            let tag = messages.iter().find(|message| message.0 == b'C').unwrap();
+            assert_eq!(tag.1, format!("{expected}\0").as_bytes(), "{sql}");
         }
     }
 
