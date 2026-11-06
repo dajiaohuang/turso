@@ -210,6 +210,7 @@ pub(crate) fn prepare_select_plan_from_arms(
             resolver,
             program,
             limit,
+            None,
             order_by,
             with,
             outer_query_refs,
@@ -225,6 +226,7 @@ pub(crate) fn prepare_select_plan_from_arms(
         resolver,
         program,
         None,
+        None,
         vec![],
         with.clone(),
         outer_query_refs,
@@ -233,17 +235,23 @@ pub(crate) fn prepare_select_plan_from_arms(
     )?;
 
     let mut left = Vec::with_capacity(compound_arms.size_hint().0);
-    for CompoundSelect {
+    while let Some(CompoundSelect {
         select: compound_select,
         operator,
-    } in compound_arms
+    }) = compound_arms.next()
     {
         left.push((last, operator));
+        let compound_limit_scope = if compound_arms.peek().is_none() {
+            limit.as_ref()
+        } else {
+            None
+        };
         last = prepare_one_select_plan(
             compound_select,
             resolver,
             program,
             None,
+            compound_limit_scope,
             vec![],
             with.clone(),
             outer_query_refs,
@@ -301,6 +309,7 @@ fn prepare_one_select_plan(
     resolver: &Resolver,
     program: &mut ProgramBuilder,
     limit: Option<ast::Limit>,
+    compound_limit_scope: Option<&ast::Limit>,
     order_by: Vec<ast::SortedColumn>,
     with: Option<ast::With>,
     outer_query_refs: &[OuterQueryReference],
@@ -342,7 +351,7 @@ fn prepare_one_select_plan(
                     group_by.as_ref(),
                     &window_clause,
                     &order_by,
-                    limit.as_ref(),
+                    limit.as_ref().or(compound_limit_scope),
                 )
             } else {
                 Vec::new()

@@ -432,8 +432,20 @@ pub(crate) fn plan_limit_offset_subqueries(
     cse_map: &mut Vec<(ast::Expr, ast::Expr)>,
     same_query_map: &mut Vec<(ast::Expr, TableInternalId, SubqueryOrigin)>,
 ) -> Result<()> {
-    // LIMIT and OFFSET cannot reference columns from the outer query
-    let get_outer_query_refs = |_: &TableReferences| Ok(crate::alloc::try_vec![]?);
+    // LIMIT and OFFSET cannot reference columns from the outer query, but
+    // subqueries within them can refer to CTE definitions in that scope.
+    let get_outer_query_refs = |tables: &TableReferences| {
+        Ok(tables
+            .outer_query_refs()
+            .iter()
+            .filter(|reference| reference.is_cte_name_in_scope())
+            .cloned()
+            .map(|mut reference| {
+                reference.cte_definition_only = true;
+                reference
+            })
+            .collect())
+    };
     let mut subquery_parser = get_subquery_parser(
         program,
         out_subqueries,
