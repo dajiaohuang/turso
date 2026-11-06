@@ -201,7 +201,10 @@ impl Constraint {
         }
     }
 
-    pub fn get_constraining_expr_ref<'a>(&self, where_clause: &'a [WhereTerm]) -> &'a ast::Expr {
+    pub fn get_constraining_expr_ref<'a>(&'a self, where_clause: &'a [WhereTerm]) -> &'a ast::Expr {
+        if let Some((_, expr, _)) = &self.constraining_expr {
+            return expr;
+        }
         let (idx, side) = self.where_clause_pos;
         let where_term = &where_clause[idx];
         let Ok(Some((lhs, _, rhs))) = as_binary_components(&where_term.expr) else {
@@ -324,6 +327,11 @@ pub(super) fn automatic_index_terms(
 ) -> SmallVec<[ConstraintRef; 4]> {
     let columns = table.columns();
     let can_use_term = |term: &Constraint| {
+        // The synthetic NULL boundary is meaningful only for ordered index
+        // seeks, not as a comparison value for automatic-index probes.
+        if matches!(term.constraining_expr, Some((ast::Operator::IsNot, _, _))) {
+            return false;
+        }
         if !term.can_drive_index_seek(columns) {
             return false;
         }
@@ -821,6 +829,51 @@ pub fn constraints_from_where_clause(
                             || !table_references.outer_join_may_null_extend(table)))
             };
 
+            // A non-NULL range uses a physical NULL boundary rather than SQL
+            // comparison with NULL. IsNot marks that synthetic seek key.
+            let not_null_expr = match unwrap_parens(&term.expr)? {
+                ast::Expr::NotNull(inner) => Some(inner.as_ref()),
+                ast::Expr::Binary(lhs, ast::Operator::IsNot, rhs)
+                    if matches!(unwrap_parens(rhs)?, ast::Expr::Literal(ast::Literal::Null)) =>
+                {
+                    Some(lhs.as_ref())
+                }
+                ast::Expr::Binary(lhs, ast::Operator::IsNot, rhs)
+                    if matches!(unwrap_parens(lhs)?, ast::Expr::Literal(ast::Literal::Null)) =>
+                {
+                    Some(rhs.as_ref())
+                }
+                _ => None,
+            };
+            if let Some(inner) = not_null_expr
+                .filter(|_| matches!(&table_reference.table, crate::schema::Table::BTree(_)))
+            {
+                if let ast::Expr::Column { table, column, .. } = unwrap_parens(inner)? {
+                    if *table == table_reference.internal_id && rowid_alias_column != Some(*column)
+                    {
+                        cs.constraints.push(Constraint {
+                            where_clause_pos: (i, BinaryExprSide::Rhs),
+                            operator: ast::Operator::Greater.into(),
+                            table_col_pos: Some(*column),
+                            expr: None,
+                            constraining_expr: Some((
+                                ast::Operator::IsNot,
+                                ast::Expr::Literal(ast::Literal::Null),
+                                Affinity::Blob,
+                            )),
+                            lhs_mask: TableMask::default(),
+                            selectivity: params.sel_is_not_null,
+                            usable: true,
+                            outer_join_compatible: can_use_before_null_extension(false),
+                            is_rowid: false,
+                            comparison_affinity: None,
+                            null_matching: false,
+                            collation: None,
+                        });
+                    }
+                }
+                continue;
+            }
             // Try to extract as binary expression first
             if let Some((lhs, operator, rhs)) = as_binary_components(&term.expr)? {
                 // `x IS TRUE` checks whether x is true; it does not compare x
@@ -862,7 +915,7 @@ pub fn constraints_from_where_clause(
                     is_op && !is_non_null_literal(constraining_expr)
                 };
                 // If either the LHS or RHS of the constraint is a column from the table, add the constraint.
-                match lhs {
+                match unwrap_parens(lhs)? {
                     ast::Expr::Column { table, column, .. } => {
                         if *table == table_reference.internal_id {
                             let table_column = &table_reference.table.columns()[*column];
@@ -968,7 +1021,7 @@ pub fn constraints_from_where_clause(
                     }
                     _ => {}
                 };
-                match rhs {
+                match unwrap_parens(rhs)? {
                     ast::Expr::Column { table, column, .. } => {
                         if *table == table_reference.internal_id {
                             let table_column = &table_reference.table.columns()[*column];

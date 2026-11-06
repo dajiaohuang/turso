@@ -423,6 +423,11 @@ pub(crate) fn seek_constraint_parts(index: Option<&Index>, seek_def: &SeekDef) -
             .map(|col| (col.name.as_str(), col.order)),
         None => Some(("rowid", SortOrder::Asc)),
     };
+    if seek_def.not_null_range {
+        if let Some((name, _)) = range_col {
+            parts.push(format!("{name}>?"));
+        }
+    }
     if let SeekKeyComponent::Expr(_) = &seek_def.start.last_component {
         if let Some((name, order)) = range_col {
             let op = if order == SortOrder::Desc {
@@ -459,7 +464,8 @@ pub(crate) fn seek_constraint_parts(index: Option<&Index>, seek_def: &SeekDef) -
         }
     }
     if let Some((_, order)) = range_col {
-        if parts.len() == range_col_idx + 2
+        if !seek_def.not_null_range
+            && parts.len() == range_col_idx + 2
             && ((order == SortOrder::Desc) != (seek_def.iter_dir == IterationDirection::Backwards))
         {
             parts.swap(range_col_idx, range_col_idx + 1);

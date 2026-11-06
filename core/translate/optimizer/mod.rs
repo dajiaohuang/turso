@@ -4499,6 +4499,7 @@ pub fn build_seek_def_from_constraints(
             IterationDirection::Backwards => (SeekOp::LE { eq_only: true }, SeekOp::LT),
         };
         return Ok(SeekDef {
+            not_null_range: false,
             prefix: Vec::new(),
             iter_dir,
             start: SeekKey {
@@ -4564,6 +4565,7 @@ fn build_seek_def(
             IterationDirection::Backwards => (SeekOp::LE { eq_only: true }, SeekOp::LT),
         };
         return Ok(SeekDef {
+            not_null_range: false,
             prefix: key,
             iter_dir,
             start: SeekKey {
@@ -4581,7 +4583,72 @@ fn build_seek_def(
     turso_assert!(last.lower_bound.is_some() || last.upper_bound.is_some());
 
     // pop last key as we will do some form of range search
-    let last = key.pop().unwrap();
+    let mut last = key.pop().unwrap();
+    let not_null_boundary = matches!(last.lower_bound, Some((ast::Operator::IsNot, _, _)));
+    if not_null_boundary && last.upper_bound.is_none() {
+        let (start, end) = match (iter_dir, last.nulls_order) {
+            (IterationDirection::Forwards, ast::NullsOrder::First) => (
+                SeekKey {
+                    last_component: SeekKeyComponent::Null,
+                    op: SeekOp::GT,
+                    affinity: Affinity::Blob,
+                },
+                SeekKey {
+                    last_component: SeekKeyComponent::None,
+                    op: SeekOp::GT,
+                    affinity: Affinity::Blob,
+                },
+            ),
+            (IterationDirection::Forwards, ast::NullsOrder::Last) => (
+                SeekKey {
+                    last_component: SeekKeyComponent::None,
+                    op: SeekOp::GE { eq_only: false },
+                    affinity: Affinity::Blob,
+                },
+                SeekKey {
+                    last_component: SeekKeyComponent::Null,
+                    op: SeekOp::GE { eq_only: false },
+                    affinity: Affinity::Blob,
+                },
+            ),
+            (IterationDirection::Backwards, ast::NullsOrder::First) => (
+                SeekKey {
+                    last_component: SeekKeyComponent::None,
+                    op: SeekOp::LE { eq_only: false },
+                    affinity: Affinity::Blob,
+                },
+                SeekKey {
+                    last_component: SeekKeyComponent::Null,
+                    op: SeekOp::LE { eq_only: false },
+                    affinity: Affinity::Blob,
+                },
+            ),
+            (IterationDirection::Backwards, ast::NullsOrder::Last) => (
+                SeekKey {
+                    last_component: SeekKeyComponent::Null,
+                    op: SeekOp::LT,
+                    affinity: Affinity::Blob,
+                },
+                SeekKey {
+                    last_component: SeekKeyComponent::None,
+                    op: SeekOp::LT,
+                    affinity: Affinity::Blob,
+                },
+            ),
+        };
+        return Ok(SeekDef {
+            not_null_range: true,
+            prefix: key,
+            iter_dir,
+            start,
+            end,
+        });
+    }
+    if not_null_boundary {
+        // A real upper comparison already excludes NULL; its usual range
+        // handling supplies the physical boundary.
+        last.lower_bound = None;
+    }
     let stored_nulls = last.nulls_order;
     // after that all key components must be equality constraints
     turso_debug_assert!(key.iter().all(|k| k.eq.is_some()));
@@ -4775,6 +4842,7 @@ fn build_seek_def(
             };
             apply_null_boundaries(&mut start, &mut end);
             SeekDef {
+                not_null_range: not_null_boundary,
                 prefix: key,
                 iter_dir,
                 start,
@@ -4896,6 +4964,7 @@ fn build_seek_def(
             };
             apply_null_boundaries(&mut start, &mut end);
             SeekDef {
+                not_null_range: not_null_boundary,
                 prefix: key,
                 iter_dir,
                 start,

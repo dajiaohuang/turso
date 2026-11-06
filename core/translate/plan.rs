@@ -3763,6 +3763,8 @@ impl JoinedTable {
 /// [SeekKey] also used to represent range scan termination condition.
 #[derive(Debug, Clone)]
 pub struct SeekDef {
+    /// The range is derived from an explicit IS NOT NULL predicate.
+    pub not_null_range: bool,
     /// Common prefix of the key which is shared between start/end fields
     /// For example, given:
     /// - CREATE INDEX i ON t (x, y desc)
