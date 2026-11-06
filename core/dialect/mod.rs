@@ -231,6 +231,11 @@ pub trait Dialect: Send + Sync + 'static {
         false
     }
 
+    /// An implicit INSERT target list can omit trailing values, using defaults.
+    fn insert_implicit_target_allows_fewer_values(&self) -> bool {
+        false
+    }
+
     /// Whether integer division by zero raises an error.
     ///
     /// PostgreSQL raises SQLSTATE 22012. SQLite returns NULL.

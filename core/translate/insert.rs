@@ -508,7 +508,16 @@ pub fn translate_insert(
     if !result_columns.is_empty() {
         program.result_columns.clone_from(&result_columns);
     }
-    let insertion = build_insertion(program, &table, &columns, ctx.num_values)?;
+    let insertion = build_insertion(
+        program,
+        &table,
+        &columns,
+        ctx.num_values,
+        resolver
+            .catalog
+            .dialect
+            .insert_implicit_target_allows_fewer_values(),
+    )?;
 
     translate_rows_and_open_tables(
         program,
@@ -2315,9 +2324,16 @@ fn init_source_emission<'a>(
     } else {
         columns.len()
     };
+    let allows_fewer = columns.is_empty()
+        && resolver
+            .catalog
+            .dialect
+            .insert_implicit_target_allows_fewer_values();
     if !values.is_empty() {
         // If we had a single tuple in VALUES, it was inserted into the values vector parameter.
-        if values.len() != required_column_count {
+        if values.len() != required_column_count
+            && !(allows_fewer && values.len() < required_column_count)
+        {
             crate::bail_parse_error!(
                 "table {} has {required_column_count} columns but {} values were supplied",
                 table.get_name(),
@@ -2370,7 +2386,9 @@ fn init_source_emission<'a>(
                 let num_result_cols = program.nested(|program| {
                     translate_select(select, resolver, program, query_destination, connection)
                 })?;
-                if num_result_cols != required_column_count {
+                if num_result_cols != required_column_count
+                    && !(allows_fewer && num_result_cols < required_column_count)
+                {
                     crate::bail_parse_error!(
                         "table {} has {required_column_count} columns but {} values were supplied",
                         table.get_name(),
@@ -2425,6 +2443,7 @@ fn init_source_emission<'a>(
                             .columns()
                             .iter()
                             .filter(|col| !col.hidden() && !col.is_generated())
+                            .take(num_result_cols)
                             .map(|col| col.affinity().aff_mask())
                             .collect::<String>()
                     } else {
@@ -2697,6 +2716,7 @@ fn build_insertion<'a>(
     table: &'a Table,
     columns: &'a [ast::Name],
     num_values: usize,
+    allow_fewer: bool,
 ) -> Result<Insertion<'a>> {
     let table_columns = table.columns();
     let num_cols = table_columns.len();
@@ -2729,7 +2749,8 @@ fn build_insertion<'a>(
             .iter()
             .filter(|c| !c.hidden() && !c.is_generated())
             .count();
-        if num_values != num_storable_columns {
+        if num_values != num_storable_columns && !(allow_fewer && num_values < num_storable_columns)
+        {
             crate::bail_parse_error!(
                 "table {} has {} columns but {} values were supplied",
                 &table.get_name(),
@@ -2742,6 +2763,9 @@ fn build_insertion<'a>(
             if col.hidden() || col.is_generated() {
                 // Hidden and generated columns are not taken into account.
                 continue;
+            }
+            if value_idx >= num_values {
+                break;
             }
             if col.is_rowid_alias() {
                 insertion_key = InsertionKey::RowidAlias(ColMapping {
@@ -3547,7 +3571,7 @@ fn translate_virtual_table_insert(
      * argv[1] = (rowid for insert - NULL in most cases)
      * argv[2..] = column values
      * */
-    let insertion = build_insertion(program, &table, &columns, num_values)?;
+    let insertion = build_insertion(program, &table, &columns, num_values, false)?;
 
     translate_rows_single(program, &value, &insertion, resolver, false)?;
     let conflict_action = on_conflict.as_ref().map(|c| c.bit_value()).unwrap_or(0) as u16;

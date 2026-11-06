@@ -218,6 +218,10 @@ impl Dialect for PostgresDialect {
         true
     }
 
+    fn insert_implicit_target_allows_fewer_values(&self) -> bool {
+        true
+    }
+
     fn errors_on_zero_divisor(&self) -> bool {
         true
     }

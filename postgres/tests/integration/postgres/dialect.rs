@@ -2,6 +2,34 @@ use crate::common::TempDatabase;
 use turso_core::{Numeric, StepResult, Value};
 
 #[turso_macros::test(mvcc)]
+fn implicit_insert_uses_trailing_defaults(db: TempDatabase) {
+    let conn = db.connect_postgres();
+    conn.execute("CREATE TABLE b(id int, y text DEFAULT 'fallback', z int DEFAULT 9)")
+        .unwrap();
+    conn.execute("INSERT INTO b VALUES (1)").unwrap();
+    conn.execute("INSERT INTO b VALUES (2, 'hi'), (3, 'bye')")
+        .unwrap();
+    conn.execute("INSERT INTO b SELECT 5").unwrap();
+    conn.execute("INSERT INTO b SELECT id+10 FROM b WHERE id < 3")
+        .unwrap();
+    assert_eq!(
+        rows_of(&conn, "SELECT * FROM b ORDER BY id"),
+        [
+            "1|fallback|9",
+            "2|hi|9",
+            "3|bye|9",
+            "5|fallback|9",
+            "11|fallback|9",
+            "12|fallback|9"
+        ]
+    );
+    assert!(conn.execute("INSERT INTO b(id,y) VALUES (4)").is_err());
+    assert!(conn
+        .execute("INSERT INTO b VALUES (4, 'hi', 3, 4)")
+        .is_err());
+}
+
+#[turso_macros::test(mvcc)]
 fn test_postgres_ctes_ignore_search_path(db: TempDatabase) {
     let conn = db.connect_postgres();
     conn.execute("CREATE TABLE shadowed_cte (v INTEGER)")

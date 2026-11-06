@@ -1,0 +1,17 @@
+@database :memory:
+
+test sqlite-implicit-short-values-rejected {
+    CREATE TABLE t(a, b DEFAULT 9);
+    INSERT INTO t VALUES (1);
+}
+expect error {
+    table t has 2 columns but 1 values were supplied
+}
+
+test sqlite-implicit-short-select-rejected {
+    CREATE TABLE t(a, b DEFAULT 9);
+    INSERT INTO t SELECT 1;
+}
+expect error {
+    table t has 2 columns but 1 values were supplied
+}
