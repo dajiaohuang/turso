@@ -289,6 +289,8 @@ fn parse_error_sqlstate(msg: &str) -> &'static str {
         || msg.starts_with("cannot drop type")
     {
         SQLSTATE_DEPENDENT_OBJECTS_STILL_EXIST
+    } else if msg.starts_with("duplicate column name: ") {
+        SQLSTATE_DUPLICATE_COLUMN
     } else if is_duplicate_object_error(msg) {
         SQLSTATE_DUPLICATE_TABLE
     } else if msg.contains("no such table")
@@ -425,6 +427,22 @@ fn object_name(object: &Object) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_column_sqlstate_does_not_depend_on_the_column_name() {
+        for name in ["a", "no such column", "no such table", "already exists"] {
+            let error = LimboError::ParseError(format!("duplicate column name: {name}"));
+            assert_eq!(
+                ErrorReport::from(&error).sqlstate,
+                SQLSTATE_DUPLICATE_COLUMN
+            );
+        }
+        let missing = LimboError::ParseError("no such column: a".to_string());
+        assert_eq!(
+            ErrorReport::from(&missing).sqlstate,
+            SQLSTATE_UNDEFINED_COLUMN
+        );
+    }
 
     #[test]
     fn sqlstate_covers_errors_that_sql_alone_cannot_trigger() {

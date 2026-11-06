@@ -105,6 +105,23 @@ fn embedded_prepare_errors_keep_the_core_source() {
 }
 
 #[test]
+fn duplicate_column_sqlstate_is_not_changed_by_the_name() {
+    let (_io, conn) = pg_connection();
+    conn.execute("CREATE TABLE t (a INT, \"no such column\" INT, \"no such table\" INT)")
+        .unwrap();
+    for sql in [
+        "ALTER TABLE t ADD COLUMN a INT",
+        "ALTER TABLE t ADD COLUMN \"no such column\" INT",
+        "ALTER TABLE t ADD COLUMN \"no such table\" INT",
+        "ALTER TABLE t RENAME COLUMN a TO \"no such column\"",
+        "CREATE TABLE dupe (a INT, a INT)",
+    ] {
+        assert_eq!(exec_err(&conn, sql).sqlstate, "42701", "{sql}");
+    }
+    assert_eq!(exec_err(&conn, "SELECT absent FROM t").sqlstate, "42703");
+}
+
+#[test]
 fn embedded_query_runner_returns_frontend_errors() {
     let (_io, conn) = pg_connection();
     let error = conn
