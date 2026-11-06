@@ -1174,6 +1174,8 @@ pub struct ProgramState {
     ephemeral_temp_files: HashMap<usize, TempFile>,
     /// Attached pagers that have open savepoints for statement rollback.
     attached_savepoint_pagers: Vec<Arc<Pager>>,
+    /// Schemas as they were when this statement's write savepoint began.
+    statement_schema_snapshot: Option<StatementSchemaSnapshot>,
     /// Pending error to return after FAIL mode commit completes.
     /// When a constraint error occurs with FAIL resolve type in autocommit mode,
     /// we need to commit partial changes before returning the error.
@@ -1333,6 +1335,7 @@ impl ProgramState {
             write_baseline: WriteBaseline::None,
             has_stmt_transaction: false,
             attached_savepoint_pagers: Vec::new(),
+            statement_schema_snapshot: None,
             n_change: AtomicI64::new(0),
             n_total_change: AtomicI64::new(0),
             explain_state: RwLock::new(ExplainState::default()),
@@ -1508,6 +1511,7 @@ impl ProgramState {
         self.has_stmt_transaction = false;
         self.distinct_key_values.clear();
         self.attached_savepoint_pagers.clear();
+        self.statement_schema_snapshot = None;
         *self.n_change.get_mut() = 0;
         *self.n_total_change.get_mut() = 0;
         // reset has exclusive access, so no lock or atomic store is needed.
@@ -1785,6 +1789,7 @@ impl ProgramState {
                 result?;
                 self.uses_subjournal = true;
             }
+            self.ensure_statement_schema_snapshot(connection);
         }
 
         self.has_stmt_transaction = true;
@@ -1801,6 +1806,14 @@ impl ProgramState {
             .store(0, Ordering::Release);
         self.fk_immediate_violation = None;
         Ok(IOResult::Done(()))
+    }
+
+    fn ensure_statement_schema_snapshot(&mut self, connection: &Connection) {
+        if self.statement_schema_snapshot.is_none() {
+            self.statement_schema_snapshot = Some(connection.with_savepoint_schema_snapshot(
+                |main, temp, staged| StatementSchemaSnapshot { main, temp, staged },
+            ));
+        }
     }
 
     /// End a statement subtransaction.
@@ -1942,6 +1955,22 @@ impl ProgramState {
                     Ordering::SeqCst,
                 );
 
+                if pager_err.is_none() {
+                    if let Some(snapshot) = self.statement_schema_snapshot.take() {
+                        connection.restore_schema_snapshot(
+                            snapshot.main,
+                            snapshot.temp,
+                            snapshot.staged,
+                        );
+                        connection.with_all_attached_pagers_with_index(|pagers| {
+                            for (_, attached_pager) in pagers {
+                                attached_pager.set_schema_cookie(None);
+                            }
+                        });
+                        pager.set_schema_cookie(None);
+                    }
+                }
+
                 match pager_err {
                     Some(e) => Err(e),
                     None => Ok(()),
@@ -1955,6 +1984,7 @@ impl ProgramState {
         for p in &attached_pagers {
             p.stop_use_subjournal();
         }
+        self.statement_schema_snapshot = None;
         result
     }
 
@@ -2010,6 +2040,12 @@ impl ProgramState {
         self.fk_immediate_violations_during_stmt
             .fetch_add(v, Ordering::AcqRel);
     }
+}
+
+struct StatementSchemaSnapshot {
+    main: crate::sync::Arc<crate::schema::Schema>,
+    temp: Option<crate::sync::Arc<crate::schema::Schema>>,
+    staged: rustc_hash::FxHashMap<usize, crate::sync::Arc<crate::schema::Schema>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -5201,6 +5201,7 @@ pub fn op_transaction_inner(
                             result?;
                             state.attached_savepoint_pagers.push(pager.clone());
                         }
+                        state.ensure_statement_schema_snapshot(&program.connection);
                     }
                 }
 
@@ -5772,15 +5773,11 @@ pub fn op_savepoint(
             // consistent across tables / indexes / sequences without any
             // I/O.
             if let Some(info) = frame_info {
-                *conn.schema.write() = info.main_schema_snapshot;
-                if let Some(temp_db) = conn.temp.database.read().as_ref() {
-                    match info.temp_schema_snapshot {
-                        Some(snap) => *temp_db.db.schema.lock() = snap,
-                        None => *temp_db.db.schema.lock() = conn.empty_temp_schema(),
-                    }
-                }
-                *conn.database_schemas().write() = info.staged_schema_snapshot;
-                conn.bump_prepare_context_generation();
+                conn.restore_schema_snapshot(
+                    info.main_schema_snapshot,
+                    info.temp_schema_snapshot,
+                    info.staged_schema_snapshot,
+                );
                 if let (Some(hooks), Some(memo)) = (conn.hooks(), &info.hooks_memo) {
                     hooks.rolled_back_to_savepoint(&conn, memo);
                 }

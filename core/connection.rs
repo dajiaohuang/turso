@@ -4927,6 +4927,21 @@ impl Connection {
         )
     }
 
+    /// Restore the schema view saved before a savepoint or statement began.
+    pub(crate) fn restore_schema_snapshot(
+        &self,
+        main: Arc<Schema>,
+        temp: Option<Arc<Schema>>,
+        staged: HashMap<usize, Arc<Schema>>,
+    ) {
+        *self.schema.write() = main;
+        if let Some(temp_db) = self.temp.database.read().as_ref() {
+            *temp_db.db.schema.lock() = temp.unwrap_or_else(|| self.empty_temp_schema());
+        }
+        *self.database_schemas.write() = staged;
+        self.bump_prepare_context_generation();
+    }
+
     pub(crate) fn release_named_savepoint_frame(&self, name: &str) -> SavepointResult {
         let mut savepoints = self.named_savepoints.write();
         let Some(target_idx) = savepoints

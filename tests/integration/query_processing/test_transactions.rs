@@ -6,6 +6,30 @@ use turso_core::{Connection, LimboError, Result, Statement, StepResult, Value};
 
 use crate::common::{assert_checkpoint_preserves_content, ExecRows, TempDatabase};
 
+#[turso_macros::test]
+fn failed_ctas_restores_statement_schema_snapshot(tmp_db: TempDatabase) {
+    let conn = tmp_db.connect_limbo();
+    conn.execute("CREATE TABLE t(a INTEGER, c INTEGER)")
+        .unwrap();
+    conn.execute("INSERT INTO t VALUES(1, -9223372036854775808)")
+        .unwrap();
+    conn.execute("BEGIN").unwrap();
+    conn.execute("CREATE TABLE prior(x INTEGER)").unwrap();
+    assert!(conn
+        .execute("CREATE TABLE n AS SELECT a, abs(c) FROM t")
+        .is_err());
+    conn.execute("INSERT INTO prior VALUES(7)").unwrap();
+    conn.execute("COMMIT").unwrap();
+    let rows = helper_read_all_rows(conn.query("SELECT x FROM prior").unwrap().unwrap());
+    assert_eq!(rows, vec![vec![Value::from_i64(7)]]);
+    let rows = helper_read_all_rows(
+        conn.query("SELECT count(*) FROM sqlite_schema WHERE name = 'n'")
+            .unwrap()
+            .unwrap(),
+    );
+    assert_eq!(rows, vec![vec![Value::from_i64(0)]]);
+}
+
 // Test a scenario where there are two concurrent deferred transactions:
 //
 // 1. Both transactions T1 and T2 start at the same time.
