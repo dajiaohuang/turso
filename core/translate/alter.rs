@@ -699,6 +699,22 @@ fn emit_column_constraints_validation(
         program.preassign_label_to_next_insn(type_passed);
     }
 
+    if has_notnull {
+        let notnull_passed = program.allocate_label();
+        program.emit_insn(Insn::NotNull {
+            reg: result_reg,
+            target_pc: notnull_passed,
+        });
+        program.emit_insn(Insn::Halt {
+            constraint_info: None,
+            err_code: 1,
+            description: "NOT NULL constraint failed".to_string(),
+            on_error: None,
+            description_reg: None,
+        });
+        program.preassign_label_to_next_insn(notnull_passed);
+    }
+
     if !check_constraints.is_empty() {
         let table = Table::BTree(resolved_table_arc.clone());
         let table_references = TableReferences::new(
@@ -743,22 +759,6 @@ fn emit_column_constraints_validation(
             skip_row_label,
             Some(&table_references),
         )?;
-    }
-
-    if has_notnull {
-        let notnull_passed = program.allocate_label();
-        program.emit_insn(Insn::NotNull {
-            reg: result_reg,
-            target_pc: notnull_passed,
-        });
-        program.emit_insn(Insn::Halt {
-            constraint_info: None,
-            err_code: 1,
-            description: "NOT NULL constraint failed".to_string(),
-            on_error: None,
-            description_reg: None,
-        });
-        program.preassign_label_to_next_insn(notnull_passed);
     }
 
     program.emit_insn(Insn::Next {

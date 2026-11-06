@@ -13,6 +13,36 @@ use asserting::prelude::*;
 use tempfile::TempDir;
 
 #[test]
+fn test_add_column_generated_not_null_precedes_existing_check() {
+    for strict in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let db = TempDatabase::new_with_existent(&dir.path().join("constraints.db"));
+        let conn = db.connect_limbo();
+        conn.execute("PRAGMA ignore_check_constraints=1").unwrap();
+        let create = if strict {
+            "CREATE TABLE t(a INT CHECK(a > 0)) STRICT"
+        } else {
+            "CREATE TABLE t(a INT CHECK(a > 0))"
+        };
+        conn.execute(create).unwrap();
+        conn.execute("INSERT INTO t VALUES(-1)").unwrap();
+        conn.execute("PRAGMA ignore_check_constraints=0").unwrap();
+        let alter = if strict {
+            "ALTER TABLE t ADD COLUMN d INT AS (NULL) NOT NULL"
+        } else {
+            "ALTER TABLE t ADD COLUMN d AS (NULL) NOT NULL"
+        };
+        let error = conn
+            .execute(alter)
+            .expect_err("new column must reject NULL");
+        assert!(
+            error.to_string().contains("NOT NULL constraint failed"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn test_add_column_old_check_failure_preserves_schema_and_transaction() {
     let temp_dir = TempDir::new().expect("create isolated database directory");
     let path = temp_dir.path().join("add_column_old_check.db");
