@@ -2,6 +2,27 @@ use crate::common::TempDatabase;
 use turso_core::Value;
 
 #[turso_macros::test(mvcc)]
+fn test_renamed_table_preserves_declared_name(db: TempDatabase) {
+    let conn = db.connect_postgres();
+    conn.execute("CREATE TABLE \"Par\" (k INT PRIMARY KEY)")
+        .unwrap();
+    conn.execute("ALTER TABLE \"Par\" RENAME TO \"NewP\"")
+        .unwrap();
+    conn.execute("CREATE TABLE unquoted (k INT)").unwrap();
+    conn.execute("ALTER TABLE unquoted RENAME TO NewU").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT relname FROM pg_class WHERE relkind = 'r' ORDER BY relname")
+        .unwrap();
+    assert_eq!(
+        stmt.run_collect_rows().unwrap(),
+        vec![
+            vec![Value::build_text("NewP")],
+            vec![Value::build_text("newu")]
+        ]
+    );
+}
+
+#[turso_macros::test(mvcc)]
 fn test_pg_object_catalog_column_counts(db: TempDatabase) {
     let conn = db.connect_postgres();
     conn.execute("SELECT set_config('search_path', '', false)")
