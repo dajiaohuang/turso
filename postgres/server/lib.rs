@@ -899,7 +899,9 @@ mod tests {
     fn error_response_fields_end_at_nul() {
         let (mut client, _conn) = copy_test_client();
         let events = client
-            .simple_query("SELECT set_config('nodot' || chr(0) || 'Dinjected detail', 'x', false)")
+            .simple_query(
+                "SELECT set_config('nodot' || unistr('\\u0000') || 'Dinjected detail', 'x', false)",
+            )
             .unwrap();
         let fields = events
             .iter()
@@ -918,6 +920,32 @@ mod tests {
             matches!(events.last(), Some(BackendEvent::ReadyForQuery(_))),
             "{events:?}"
         );
+    }
+
+    #[test]
+    fn chr_rejects_invalid_unicode_values() {
+        let (mut client, _conn) = copy_test_client();
+        for (sql, code) in [
+            ("SELECT chr(0)", "54000"),
+            ("SELECT chr(0 + 0)", "54000"),
+            ("SELECT chr(-1)", "22023"),
+            ("SELECT chr(1114112)", "54000"),
+            ("SELECT chr(55296)", "54000"),
+        ] {
+            let events = client.simple_query(sql).unwrap();
+            let fields = events
+                .iter()
+                .find_map(|event| match event {
+                    BackendEvent::ErrorResponse(fields) => Some(fields),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{sql}: {events:?}"));
+            assert_eq!(
+                fields.get(&b'C').map(String::as_str),
+                Some(code),
+                "{sql}: {fields:?}"
+            );
+        }
     }
 
     #[test]

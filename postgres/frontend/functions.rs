@@ -10,11 +10,11 @@ use turso_core::{
     Connection, ExternalFunc, IOResult, LimboError, Numeric, OpenOptions, Register, Result, Value,
 };
 use turso_pg_parser::sqlstate::{
-    SQLSTATE_INTERNAL_ERROR, SQLSTATE_INVALID_ESCAPE_SEQUENCE,
+    SQLSTATE_INTERNAL_ERROR, SQLSTATE_INVALID_ESCAPE_SEQUENCE, SQLSTATE_INVALID_PARAMETER_VALUE,
     SQLSTATE_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE, SQLSTATE_INVALID_ROW_COUNT_IN_RESULT_OFFSET_CLAUSE,
     SQLSTATE_INVALID_TEXT_REPRESENTATION, SQLSTATE_NUMERIC_VALUE_OUT_OF_RANGE,
-    SQLSTATE_STATEMENT_TOO_COMPLEX, SQLSTATE_UNDEFINED_FUNCTION, SQLSTATE_UNDEFINED_OBJECT,
-    SQLSTATE_UNTRANSLATABLE_CHARACTER,
+    SQLSTATE_PROGRAM_LIMIT_EXCEEDED, SQLSTATE_STATEMENT_TOO_COMPLEX, SQLSTATE_UNDEFINED_FUNCTION,
+    SQLSTATE_UNDEFINED_OBJECT, SQLSTATE_UNTRANSLATABLE_CHARACTER,
 };
 
 /// Registers one native scalar function per name. Each body is a Rust
@@ -44,6 +44,7 @@ macro_rules! scalar_functions {
 
 pub(crate) fn register_functions(options: OpenOptions) -> OpenOptions {
     scalar_functions!(options, |connection, args| {
+        "chr"(FunctionArity::Exact(1), true) => exec_pg_chr(args)?,
         "acldefault"(FunctionArity::Exact(2), true) => exec_acl_default(connection, args)?,
         "pg_get_userbyid"(FunctionArity::Exact(1), false) => {
             oid_arg(args, 0)?.map(|oid| exec_pg_get_user_by_id(connection, oid))
@@ -437,6 +438,50 @@ fn int_arg(args: &[Register], i: usize, default: i64) -> i64 {
     args.get(i)
         .and_then(|arg| arg.get_value().as_int())
         .unwrap_or(default)
+}
+
+fn exec_pg_chr(args: &[Register]) -> Result<Option<String>> {
+    let value = args[0].get_value();
+    let code = match value {
+        Value::Null => return Ok(None),
+        Value::Numeric(Numeric::Integer(value)) => *value,
+        Value::Text(value) => value.as_str().trim().parse::<i64>().map_err(|_| {
+            sqlstate_error(
+                SQLSTATE_INVALID_TEXT_REPRESENTATION,
+                format!(
+                    "invalid input syntax for type integer: \"{}\"",
+                    value.as_str()
+                ),
+            )
+        })?,
+        Value::Numeric(Numeric::Float(_)) => return Err(undefined_function("chr", &["numeric"])),
+        Value::Blob(_) => return Err(undefined_function("chr", &["bytea"])),
+    };
+    if code < 0 {
+        return Err(sqlstate_error(
+            SQLSTATE_INVALID_PARAMETER_VALUE,
+            "character number must be positive",
+        ));
+    }
+    if code == 0 {
+        return Err(sqlstate_error(
+            SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
+            "null character not permitted",
+        ));
+    }
+    if code > 0x10ffff {
+        return Err(sqlstate_error(
+            SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
+            format!("requested character too large for encoding: {code}"),
+        ));
+    }
+    let Some(character) = char::from_u32(code as u32) else {
+        return Err(sqlstate_error(
+            SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
+            format!("requested character not valid for encoding: {code}"),
+        ));
+    };
+    Ok(Some(character.to_string()))
 }
 
 fn oid_arg(args: &[Register], i: usize) -> Result<Option<i64>> {
