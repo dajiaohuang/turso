@@ -2124,13 +2124,8 @@ fn update_cache_size(
     pager: Arc<Pager>,
     connection: Arc<crate::Connection>,
 ) -> crate::Result<()> {
-    let mut cache_size_unformatted: i64 = value;
-
-    let mut cache_size = if cache_size_unformatted < 0 {
-        let kb = cache_size_unformatted
-            .checked_abs()
-            .unwrap_or(i64::MAX)
-            .saturating_mul(1024);
+    let mut cache_size = if value < 0 {
+        let kb = value.checked_abs().unwrap_or(i64::MAX).saturating_mul(1024);
         let page_size = pager
             .io
             .block(|| pager.with_header(|header| header.page_size))
@@ -2149,22 +2144,21 @@ fn update_cache_size(
 
     if cache_size > CacheSize::MAX_SAFE {
         cache_size = 0;
-        cache_size_unformatted = 0;
     }
 
     if cache_size < 0 {
         cache_size = 0;
-        cache_size_unformatted = 0;
     }
 
     let final_cache_size = if cache_size < CacheSize::MIN {
-        cache_size_unformatted = CacheSize::MIN;
         CacheSize::MIN
     } else {
         cache_size
     };
 
-    connection.set_cache_size(cache_size_unformatted as i32);
+    // The reported PRAGMA value is distinct from our internal cache capacity,
+    // which is bounded for safety and may be converted from kibibytes to pages.
+    connection.set_cache_size(value as i32);
 
     pager
         .change_page_cache_size(final_cache_size as usize)

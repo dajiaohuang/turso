@@ -7,13 +7,48 @@ expect {
     -2000
 }
 
-# 200 is minimum cache size value, so we test for this
+# The page cache can enforce an internal minimum while retaining the PRAGMA value.
 test pragma-set-cache-size {
     PRAGMA cache_size = 200;
     PRAGMA cache_size
 }
 expect {
     200
+}
+
+test pragma-cache-size-small-positive {
+    PRAGMA cache_size = 5;
+    PRAGMA cache_size;
+}
+expect {
+    5
+}
+
+test pragma-cache-size-small-negative {
+    PRAGMA cache_size = -5;
+    PRAGMA cache_size;
+}
+expect {
+    -5
+}
+
+test pragma-cache-size-zero {
+    PRAGMA cache_size = 0;
+    PRAGMA cache_size;
+}
+expect {
+    0
+}
+
+test pragma-cache-size-large-and-overflow {
+    PRAGMA cache_size = 2147483647;
+    PRAGMA cache_size;
+    PRAGMA cache_size = 2147483648;
+    PRAGMA cache_size;
+}
+expect {
+    2147483647
+    0
 }
 
 # Even though the cache size was set to 100 in previous test, a new connection defaults back to -2000.
