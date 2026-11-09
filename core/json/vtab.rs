@@ -266,8 +266,8 @@ impl InternalVirtualTableCursor for JsonEachCursor {
 
         let mut jsonb = convert_dbtype_to_jsonb(&args[0], Conv::Strict)?;
 
-        let (root_json, root_offset, root_id) = if args.len() == 1 {
-            (jsonb, 0, 0)
+        let (root_json, root_offset, root_id, first_child) = if args.len() == 1 {
+            (jsonb, 0, 0, true)
         } else if let Some(found) = navigate_to_path(&mut jsonb, &args[1])? {
             found
         } else {
@@ -279,9 +279,10 @@ impl InternalVirtualTableCursor for JsonEachCursor {
         self.id = root_id;
         self.path_to_current_value =
             InPlaceJsonPath::from_json_path(root_path.to_string(), json_path(&root_path)?);
-        let root_parent_cursor = match self.path_to_current_value.key() {
-            Key::Integer(index) if *index != 0 => "$".len(),
-            _ => self.path_to_current_value.cursor_before_last_element(),
+        let root_parent_cursor = if first_child {
+            self.path_to_current_value.cursor_before_last_element()
+        } else {
+            "$".len()
         };
         let iterator_state = json_iterator_from(&self.json)?;
         let innermost_container_path = if matches!(self.traversal_mode, JsonTraversalMode::Tree)
@@ -486,8 +487,8 @@ fn json_iterator_from(json: &Jsonb) -> crate::Result<IteratorState> {
 fn navigate_to_path(
     jsonb: &mut Jsonb,
     path: &Value,
-) -> Result<Option<(Jsonb, i64, i64)>, LimboError> {
-    let json_path = json_path_from_db_value(path, true)?.ok_or_else(|| {
+) -> Result<Option<(Jsonb, i64, i64, bool)>, LimboError> {
+    let mut json_path = json_path_from_db_value(path, true)?.ok_or_else(|| {
         LimboError::InvalidArgument(format!("path '{path}' is not a valid json path"))
     })?;
     let mut search_operation = SearchOperation::new(jsonb.len() / 2)?;
@@ -501,7 +502,22 @@ fn navigate_to_path(
     let root_id = search_operation
         .label_offset()
         .map_or(value_offset, |offset| offset as i64);
-    Ok(Some((search_operation.result(), value_offset, root_id)))
+    let first_child = if json_path.elements.len() > 1 {
+        json_path.elements.pop();
+        let mut parent = SearchOperation::new(jsonb.len() / 2)?;
+        jsonb.operate_on_path(&json_path, &mut parent)?;
+        let parent_offset = parent.value_offset();
+        let (_, header_size) = jsonb.read_header(parent_offset)?;
+        root_id as usize == parent_offset + header_size
+    } else {
+        true
+    };
+    Ok(Some((
+        search_operation.result(),
+        value_offset,
+        root_id,
+        first_child,
+    )))
 }
 
 mod columns {
@@ -754,11 +770,22 @@ impl InPlaceJsonPath {
             (json_path, last_element)
         };
 
-        let element_lengths = json_path
+        let mut element_lengths: Vec<usize> = json_path
             .elements
             .iter()
             .map(Self::element_length)
             .collect();
+
+        // The parsed array index loses its original spelling, including leading
+        // zeroes. Keep the actual byte length for truncating the original path.
+        if matches!(
+            json_path.elements.last(),
+            Some(PathElement::ArrayLocator(_))
+        ) {
+            if let (Some(start), Some(last)) = (path.rfind('['), element_lengths.last_mut()) {
+                *last = path.len() - start;
+            }
+        }
 
         Self {
             string: path,

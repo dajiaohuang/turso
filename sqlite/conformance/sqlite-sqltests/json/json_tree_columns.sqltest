@@ -287,6 +287,43 @@ expect {
     $.a|$.a.b
 }
 
+test json-tree-nonfirst-object-root-path {
+    SELECT path FROM json_tree('{"a":{"x":1,"b":5}}', '$.a.b')
+    UNION ALL
+    SELECT path FROM json_tree('{"a":{"b":5,"x":1}}', '$.a.b');
+}
+expect {
+    $
+    $.a
+}
+
+test json-tree-leading-zero-array-root-path {
+    SELECT path FROM json_tree('{"a":[1,2]}', '$.a[00]');
+}
+expect {
+    $.a
+}
+
+test json-tree-object-root-path-descendants {
+    SELECT path, fullkey FROM json_tree('{"a":{"x":1,"b":{"c":3}}}', '$.a.b')
+    UNION ALL
+    SELECT path, fullkey FROM json_tree('{"a":{"b":{"c":3},"x":1}}', '$.a.b');
+}
+expect {
+    $|$.a.b
+    $.a.b|$.a.b.c
+    $.a|$.a.b
+    $.a.b|$.a.b.c
+}
+
+test json-tree-leading-zero-nonfirst-array-root-path {
+    SELECT path, fullkey FROM json_tree('{"a":[[1],[2]]}', '$.a[01]');
+}
+expect {
+    $|$.a[01]
+    $.a[01]|$.a[01][0]
+}
+
 test json-tree-container-array-root-path {
     SELECT path, fullkey FROM json_tree('{"a":[[0,5],[2,7]]}', '$.a[0]')
     UNION ALL

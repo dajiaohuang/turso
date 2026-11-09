@@ -994,7 +994,7 @@ impl Jsonb {
         Ok(())
     }
 
-    fn read_header(&self, cursor: usize) -> Result<(JsonbHeader, usize)> {
+    pub(super) fn read_header(&self, cursor: usize) -> Result<(JsonbHeader, usize)> {
         let (header, offset) = JsonbHeader::from_slice(cursor, &self.data)?;
 
         Ok((header, offset))
