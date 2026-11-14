@@ -3,6 +3,48 @@ import { expect, test } from 'vitest'
 import { Database, SqliteError } from './compat.js'
 import { Database as NativeDatabase } from '#index'
 
+test('binding a compat statement and rejecting missing named values', () => {
+    const db = new Database(':memory:');
+    const statement = db.prepare('SELECT :key AS key, :value AS value');
+    try {
+        expect(statement.get({ key: 'first', value: 'second' })).toEqual({ key: 'first', value: 'second' });
+        expect(() => statement.get({ key: 'third' })).toThrow('Too few parameter values');
+        expect(statement.bind({ key: 'permanent', value: null })).toBe(statement);
+        expect(statement.get()).toEqual({ key: 'permanent', value: null });
+        expect(statement.get()).toEqual({ key: 'permanent', value: null });
+    } finally {
+        statement.close();
+        db.close();
+    }
+});
+
+test('compat execution methods reject omitted positional and named values', () => {
+    const db = new Database(':memory:');
+    try {
+        for (const method of ['get', 'all', 'run', 'iterate'] as const) {
+            for (const [sql, first, missing] of [
+                ['SELECT ? AS value', ['first'], []],
+                ['SELECT :key AS value', [{ key: 'first' }], [{ other: 'missing' }]],
+            ] as const) {
+                const statement = db.prepare(sql);
+                const execute = (args: readonly unknown[]) => {
+                    const result = statement[method](...args);
+                    if (method === 'iterate') Array.from(result as Iterable<unknown>);
+                };
+                try {
+                    execute(first);
+                    expect(() => execute(missing)).toThrow('Too few parameter values');
+                    execute(first);
+                } finally {
+                    statement.close();
+                }
+            }
+        }
+    } finally {
+        db.close();
+    }
+});
+
 test('classifySql treats reindex as write', () => {
     const db = new NativeDatabase(':memory:');
     db.connectSync();

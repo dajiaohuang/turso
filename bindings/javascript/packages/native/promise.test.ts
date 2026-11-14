@@ -4,6 +4,51 @@ import { Database, connect, SqliteError, Transaction } from './promise.js'
 import { sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 
+test('binding a promise statement and rejecting omitted values', async () => {
+    const db = await connect(':memory:');
+    const statement = await db.prepare('SELECT ? AS value');
+    try {
+        expect(await statement.get('first')).toEqual({ value: 'first' });
+        await expect(statement.get()).rejects.toThrow('Too few parameter values');
+        expect(statement.bind('permanent')).toBe(statement);
+        expect(await statement.get()).toEqual({ value: 'permanent' });
+        expect(await statement.get()).toEqual({ value: 'permanent' });
+    } finally {
+        statement.close();
+        await db.close();
+    }
+});
+
+test('promise execution methods reject omitted positional and named values', async () => {
+    const db = await connect(':memory:');
+    try {
+        for (const method of ['get', 'all', 'run', 'iterate'] as const) {
+            for (const [sql, first, missing] of [
+                ['SELECT ? AS value', ['first'], []],
+                ['SELECT :key AS value', [{ key: 'first' }], [{ other: 'missing' }]],
+            ] as const) {
+                const statement = await db.prepare(sql);
+                const execute = async (args: readonly unknown[]) => {
+                    if (method === 'iterate') {
+                        for await (const row of statement.iterate(...args)) { void row; }
+                    } else {
+                        await statement[method](...args);
+                    }
+                };
+                try {
+                    await execute(first);
+                    await expect(execute(missing)).rejects.toThrow('Too few parameter values');
+                    await execute(first);
+                } finally {
+                    statement.close();
+                }
+            }
+        }
+    } finally {
+        await db.close();
+    }
+});
+
 test('drizzle-orm', async () => {
     const path = `test-${(Math.random() * 10000) | 0}.db`;
     try {

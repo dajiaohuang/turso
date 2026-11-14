@@ -1105,8 +1105,21 @@ function maybePromise<T>(arg: () => Promise<T>): MaybeLazy<T> {
   let lazy = arg;
   let promise = null;
   let value = null;
+  let pendingActions = 0;
   return {
     apply(fn) {
+      if (value != null && pendingActions === 0) {
+        fn(value);
+        return;
+      }
+      if (promise != null) {
+        pendingActions++;
+        promise = promise.then(result => {
+          fn(result);
+          return result;
+        }).finally(() => { pendingActions--; });
+        return;
+      }
       let previous = lazy;
       lazy = async () => {
         const result = await previous();
@@ -1148,6 +1161,7 @@ function maybeValue<T>(value: T): MaybeLazy<T> {
  */
 class Statement {
   private stmt: MaybeLazy<NativeStatement>;
+  private permanentlyBound = false;
   private db: NativeDatabase;
   private execLock: ExecLock;
   private ioStep: () => Promise<void>;
@@ -1220,7 +1234,7 @@ class Statement {
     await this.execLock.acquire();
     try {
       stmt.setQueryTimeout(queryOptions);
-      bindParams(stmt, toBindArgs(params));
+      bindParams(stmt, toBindArgs(params), this.permanentlyBound);
       const totalChangesBefore = this.db.totalChanges();
       while (true) {
         const [stepResult, sleepMs] = await stepSync(stmt);
@@ -1264,7 +1278,7 @@ class Statement {
     let row = undefined;
     try {
       stmt.setQueryTimeout(queryOptions);
-      bindParams(stmt, toBindArgs(params));
+      bindParams(stmt, toBindArgs(params), this.permanentlyBound);
       while (true) {
         const [stepResult, sleepMs] = await stepSync(stmt);
         if (stepResult === STEP_IO) {
@@ -1302,7 +1316,7 @@ class Statement {
     await this.execLock.acquire();
     try {
       stmt.setQueryTimeout(queryOptions);
-      bindParams(stmt, toBindArgs(params));
+      bindParams(stmt, toBindArgs(params), this.permanentlyBound);
       while (true) {
         const [stepResult, sleepMs] = await stepSync(stmt);
         if (stepResult === STEP_IO) {
@@ -1340,7 +1354,7 @@ class Statement {
     await this.execLock.acquire();
     try {
       stmt.setQueryTimeout(queryOptions);
-      bindParams(stmt, toBindArgs(params));
+      bindParams(stmt, toBindArgs(params), this.permanentlyBound);
       while (true) {
         const [stepResult, sleepMs] = await stepSync(stmt);
         if (stepResult === STEP_IO) {
@@ -1385,12 +1399,15 @@ class Statement {
    * @returns this - Statement with binded parameters
    */
   bind(...bindParameters) {
-    try {
-      bindParams(this.stmt, bindParameters);
-      return this;
-    } catch (err) {
-      throw convertError(err);
-    }
+    this.stmt.apply(stmt => {
+      try {
+        bindParams(stmt, bindParameters);
+      } catch (err) {
+        throw convertError(err);
+      }
+    });
+    this.permanentlyBound = true;
+    return this;
   }
 
   close() {

@@ -162,6 +162,10 @@ Closes the database connection.
 
 # class Statement
 
+Each execution must supply every positional or named parameter. Omitting a
+parameter raises an error instead of reusing a value from an earlier execution.
+Statements bound with `bind(...)` can execute without repeating those values.
+
 ## Methods
 
 ### run([...bindParameters]) ⇒ object
