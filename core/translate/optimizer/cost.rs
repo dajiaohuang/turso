@@ -33,7 +33,7 @@ pub fn where_node_steps(expr: &ast::Expr) -> usize {
         ast::Expr::Case {
             when_then_pairs, ..
         } => when_then_pairs.len().max(1),
-        ast::Expr::Register(_)
+        ast::Expr::Register { .. }
         | ast::Expr::Collate(..)
         | ast::Expr::DoublyQualified(..)
         | ast::Expr::Id(_)
@@ -444,7 +444,9 @@ fn estimate_rows_from_analyze_stats(
 
     let table_name = ctx.rhs_table.table.get_name();
 
-    let table_stats = ctx.stats.table_stats(table_name)?;
+    let table_stats = ctx
+        .stats
+        .table_stats(ctx.rhs_table.namespace.id, table_name)?;
     let idx_stats = table_stats.index_stats.get(&index.name)?;
 
     if eq_prefix_len <= idx_stats.avg_rows_per_distinct_prefix.len() {
@@ -470,12 +472,12 @@ pub fn estimate_cost_for_scan_or_seek(
 ) -> Cost {
     let base_row_count = *base_row_count;
 
-    let tree_depth = estimate_btree_depth(base_row_count, params.rows_per_table_page);
-
     let Some(index_info) = index_info else {
         // Full table scan (no index)
         return estimate_scan_cost(base_row_count, input_cardinality, params);
     };
+
+    let tree_depth = estimate_btree_depth(base_row_count, params.rows_per_table_page);
 
     if is_unique_point_lookup(index_info, usable_constraint_refs) {
         // Unique point lookup: 1 seek per input row, 1 row returned per seek

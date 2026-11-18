@@ -60,6 +60,7 @@ pub struct Column {
 pub enum BackendEvent {
     RowDescription(Vec<Column>),
     DataRow(Vec<Option<String>>),
+    CopyData(Vec<u8>),
     CommandComplete(String),
     EmptyQueryResponse,
     ErrorResponse(ErrorFields),
@@ -240,6 +241,7 @@ impl PgConn {
         Ok(match tag {
             b'T' => BackendEvent::RowDescription(parse_row_description(&body)?),
             b'D' => BackendEvent::DataRow(parse_data_row(&body)?),
+            b'd' => BackendEvent::CopyData(body),
             b'C' => {
                 let mut r = Reader::new(&body);
                 BackendEvent::CommandComplete(r.cstring()?)
@@ -270,7 +272,8 @@ impl PgConn {
         }
     }
 
-    fn write_message(&mut self, tag: u8, body: &[u8]) -> Result<()> {
+    /// Writes one raw frontend message frame.
+    pub fn write_message(&mut self, tag: u8, body: &[u8]) -> Result<()> {
         self.writer.write_all(&[tag])?;
         self.writer
             .write_all(&((body.len() as u32 + 4).to_be_bytes()))?;

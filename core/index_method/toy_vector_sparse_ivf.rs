@@ -317,6 +317,7 @@ pub struct VectorSparseInvertedIndexMethodCursor {
 impl IndexMethod for VectorSparseInvertedIndexMethod {
     fn attach(
         &self,
+        dialect: &dyn crate::dialect::Dialect,
         configuration: &IndexMethodConfiguration,
     ) -> Result<Arc<dyn IndexMethodAttachment>> {
         let query_pattern1 = format!(
@@ -329,7 +330,7 @@ impl IndexMethod for VectorSparseInvertedIndexMethod {
         );
         Ok(Arc::new(VectorSparseInvertedIndexMethodAttachment {
             configuration: configuration.clone(),
-            patterns: parse_patterns(&[&query_pattern1, &query_pattern2])?,
+            patterns: parse_patterns(dialect, &[&query_pattern1, &query_pattern2])?,
         }))
     }
 }
@@ -450,7 +451,7 @@ fn open_store_cursor(
 
 fn key_info() -> KeyInfo {
     KeyInfo {
-        collation: CollationSeq::Binary,
+        collation: CollationSeq::BINARY,
         sort_order: SortOrder::Asc,
         nulls_order: None,
     }
