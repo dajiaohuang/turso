@@ -180,7 +180,7 @@ pub fn bind_and_rewrite_expr<'a>(
                                 .iter()
                                 .any(|table| has_implicit_rowid(&table.table))
                         {
-                            crate::bail_parse_error!("ambiguous column name: {}", normalized_id);
+                            crate::bail_parse_error!("ambiguous column name: {}", id.as_str());
                         }
                         *expr = resolved_column.expr;
                         // FULL JOIN can make the merged value read several table columns.
@@ -196,7 +196,7 @@ pub fn bind_and_rewrite_expr<'a>(
                         .filter(|table| has_implicit_rowid(&table.table));
                     if let Some(table) = rowid_tables.next() {
                         if let Some(row_id_expr) =
-                            parse_row_id(&normalized_id, table.internal_id, || {
+                            parse_row_id(id.as_str(), table.internal_id, || {
                                 rowid_tables.next().is_some()
                             })?
                         {
@@ -217,7 +217,7 @@ pub fn bind_and_rewrite_expr<'a>(
                     // Ambiguity is only checked within the same scope depth. Once a match
                     // is found at depth N, deeper scopes (N+1, N+2, ...) are not checked.
                     if let Some(resolved_column) =
-                        resolve_unqualified_outer_column(referenced_tables, &normalized_id)?
+                        resolve_unqualified_outer_column(referenced_tables, id.as_str())?
                     {
                         if let Expr::RowId { table, .. } = &resolved_column.expr {
                             referenced_tables.mark_rowid_referenced(*table);

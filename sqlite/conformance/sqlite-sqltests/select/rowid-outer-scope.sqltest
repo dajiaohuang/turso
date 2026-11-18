@@ -50,3 +50,12 @@ test rowid-ambiguity-outer-scope {
 expect error {
     ambiguous column name: _rowid_
 }
+
+test rowid-ambiguity-preserves-name-case {
+    CREATE TABLE t(a);
+    CREATE TABLE u(b);
+    SELECT (SELECT _RoWiD_) FROM t,u;
+}
+expect error {
+    ambiguous column name: _RoWiD_
+}

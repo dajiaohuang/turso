@@ -323,7 +323,7 @@ test unqualified-rowid-multiple-real-sources {
     SELECT rowid FROM (SELECT 1) JOIN json_each('[5]') JOIN json_each('[6]');
 }
 expect error {
-    ambiguous
+    ambiguous column name: rowid
 }
 
 test json-tree-id-with-two-byte-container-header {
