@@ -333,61 +333,11 @@ fn validate_trigger_variables(
     commands: &[ast::TriggerCmd],
     when_clause: Option<&ast::Expr>,
 ) -> Result<()> {
-    let check_expr = |expr: &ast::Expr| {
-        crate::util::walk_expr_with_subqueries(expr, &mut reject_trigger_variable)
-    };
     if let Some(expr) = when_clause {
-        check_expr(expr)?;
+        crate::util::walk_expr_with_subqueries(expr, &mut reject_trigger_variable)?;
     }
     for command in commands {
-        match command {
-            ast::TriggerCmd::Select(select) => {
-                crate::util::walk_select_expressions(select, &mut reject_trigger_variable)?;
-            }
-            ast::TriggerCmd::Insert {
-                or_conflict,
-                tbl_name,
-                col_names,
-                select,
-                upsert,
-                returning,
-            } => {
-                let stmt = ast::Stmt::Insert {
-                    with: None,
-                    or_conflict: *or_conflict,
-                    tbl_name: QualifiedName {
-                        namespace: None,
-                        name: tbl_name.clone(),
-                        alias: None,
-                    },
-                    columns: col_names.clone(),
-                    body: ast::InsertBody::Select(select.clone(), upsert.clone()),
-                    returning: returning.clone(),
-                };
-                crate::util::walk_stmt_expressions(&stmt, &mut reject_trigger_variable)?;
-            }
-            ast::TriggerCmd::Update {
-                sets,
-                from,
-                where_clause,
-                ..
-            } => {
-                for set in sets {
-                    check_expr(&set.expr)?;
-                }
-                if let Some(from) = from {
-                    check_from_clause_refs(from, &|_| Ok(()), &check_expr)?;
-                }
-                if let Some(expr) = where_clause {
-                    check_expr(expr)?;
-                }
-            }
-            ast::TriggerCmd::Delete { where_clause, .. } => {
-                if let Some(expr) = where_clause {
-                    check_expr(expr)?;
-                }
-            }
-        }
+        crate::util::visit_trigger_cmd(command, &mut reject_trigger_variable)?;
     }
     Ok(())
 }

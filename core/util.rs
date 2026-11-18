@@ -1864,7 +1864,10 @@ pub fn visit_trigger<V: AstVisitor>(trigger: &Trigger, visitor: &mut V) -> Resul
     Ok(())
 }
 
-fn visit_trigger_cmd<V: AstVisitor>(cmd: &ast::TriggerCmd, visitor: &mut V) -> Result<()> {
+pub(crate) fn visit_trigger_cmd<V: AstVisitor>(
+    cmd: &ast::TriggerCmd,
+    visitor: &mut V,
+) -> Result<()> {
     match cmd {
         ast::TriggerCmd::Update {
             tbl_name,
