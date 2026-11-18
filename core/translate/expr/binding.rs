@@ -114,6 +114,14 @@ enum QualifiedNameMatch {
     Ambiguous,
 }
 
+fn has_implicit_rowid(table: &Table) -> bool {
+    match table {
+        Table::BTree(btree) => btree.has_rowid,
+        Table::Virtual(_) => true,
+        _ => false,
+    }
+}
+
 /// Rewrite ast::Expr in place, binding Column references/rewriting Expr::Id -> Expr::Column
 /// using the provided TableReferences, and replacing anonymous parameters with internal named
 /// ones
@@ -156,6 +164,24 @@ pub fn bind_and_rewrite_expr<'a>(
                     if let Some(resolved_column) =
                         resolve_unqualified_column(joined_tables, id.as_str())?
                     {
+                        let is_rowid = crate::translate::planner::ROWID_STRS
+                            .iter()
+                            .any(|name| name.eq_ignore_ascii_case(&normalized_id));
+                        let has_declared = is_rowid
+                            && joined_tables.iter().any(|table| {
+                                !matches!(
+                                    lookup_unqualified_column(&table.table, &normalized_id, false),
+                                    ColumnLookup::Missing
+                                )
+                            });
+                        if is_rowid
+                            && !has_declared
+                            && joined_tables
+                                .iter()
+                                .any(|table| has_implicit_rowid(&table.table))
+                        {
+                            crate::bail_parse_error!("ambiguous column name: {}", normalized_id);
+                        }
                         *expr = resolved_column.expr;
                         // FULL JOIN can make the merged value read several table columns.
                         for (table_id, column_index) in resolved_column.source_columns {
@@ -165,12 +191,9 @@ pub fn bind_and_rewrite_expr<'a>(
                     }
 
                     // No real column matched. SQLite now tries rowid names before outer scopes.
-                    let mut rowid_tables =
-                        joined_tables.iter().filter(|table| match &table.table {
-                            Table::BTree(btree) => btree.has_rowid,
-                            Table::Virtual(_) => true,
-                            _ => false,
-                        });
+                    let mut rowid_tables = joined_tables
+                        .iter()
+                        .filter(|table| has_implicit_rowid(&table.table));
                     if let Some(table) = rowid_tables.next() {
                         if let Some(row_id_expr) =
                             parse_row_id(&normalized_id, table.internal_id, || {
@@ -196,6 +219,9 @@ pub fn bind_and_rewrite_expr<'a>(
                     if let Some(resolved_column) =
                         resolve_unqualified_outer_column(referenced_tables, &normalized_id)?
                     {
+                        if let Expr::RowId { table, .. } = &resolved_column.expr {
+                            referenced_tables.mark_rowid_referenced(*table);
+                        }
                         *expr = resolved_column.expr;
                         for (table_id, column_index) in resolved_column.source_columns {
                             referenced_tables.mark_column_used(table_id, column_index);
@@ -716,6 +742,23 @@ fn resolve_unqualified_outer_column(
         );
         if found.ambiguous {
             crate::bail_parse_error!("ambiguous column name: {}", column_name);
+        }
+        if is_rowid_name && !has_declared_column {
+            let mut rowid_tables = scope
+                .iter()
+                .filter(|outer_ref| has_implicit_rowid(&outer_ref.table));
+            if let Some(outer_ref) = rowid_tables.next() {
+                if !found.sources.is_empty() || rowid_tables.next().is_some() {
+                    crate::bail_parse_error!("ambiguous column name: {}", column_name);
+                }
+                return Ok(Some(ResolvedColumn {
+                    expr: Expr::RowId {
+                        database: None,
+                        table: outer_ref.internal_id,
+                    },
+                    source_columns: Default::default(),
+                }));
+            }
         }
         if found.sources.is_empty() {
             continue;

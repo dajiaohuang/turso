@@ -1,0 +1,52 @@
+@database :memory:
+
+test rowid-correlated-outer-scope {
+    CREATE TABLE t(a);
+    INSERT INTO t(rowid, a) VALUES (7, 5), (8, 6);
+    SELECT (SELECT rowid), (SELECT _rowid_ FROM (SELECT 1)),
+           (SELECT (SELECT oid)) FROM t ORDER BY a;
+}
+expect {
+    7|7|7
+    8|8|8
+}
+
+test rowid-inner-scope-and-declared-name-precedence {
+    CREATE TABLE t(a);
+    CREATE TABLE u(b);
+    INSERT INTO t(rowid, a) VALUES (7, 5);
+    INSERT INTO u(rowid, b) VALUES (9, 6);
+    SELECT (SELECT rowid FROM u),
+           (SELECT rowid FROM (SELECT 42 AS rowid)),
+           (SELECT (SELECT rowid) FROM u) FROM t;
+}
+expect {
+    9|42|9
+}
+
+test rowid-ambiguity-names-oid {
+    CREATE TABLE t(a);
+    CREATE TABLE u(b);
+    SELECT oid FROM t,u;
+}
+expect error {
+    ambiguous column name: oid
+}
+
+test rowid-ambiguity-parenthesized-join {
+    CREATE TABLE t(a);
+    CREATE TABLE u(b);
+    SELECT rowid FROM t JOIN (u JOIN (SELECT 1));
+}
+expect error {
+    ambiguous column name: rowid
+}
+
+test rowid-ambiguity-outer-scope {
+    CREATE TABLE t(a);
+    CREATE TABLE u(b);
+    SELECT (SELECT _rowid_) FROM t,u;
+}
+expect error {
+    ambiguous column name: _rowid_
+}
