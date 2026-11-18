@@ -410,6 +410,7 @@ impl ProgramBuilderFlags {
     const READS_STORED_VALUES: u16 = 1 << 9;
     const WRITES_STORED_VALUES: u16 = 1 << 10;
     const HIDES_CONSTRAINT_VALUES: u16 = 1 << 11;
+    const KEEP_ARRAY_RESULTS_AS_BLOBS: u16 = 1 << 12;
 
     const fn new(is_subprogram: bool) -> Self {
         let mut new = Self(0);
@@ -527,6 +528,15 @@ impl ProgramBuilderFlags {
     #[inline]
     pub const fn set_reads_stored_values(&mut self, v: bool) {
         self.set(Self::READS_STORED_VALUES, v)
+    }
+
+    /// Keep array results in their stored representation for an INSERT source.
+    pub const fn keep_array_results_as_blobs(self) -> bool {
+        self.get(Self::KEEP_ARRAY_RESULTS_AS_BLOBS)
+    }
+
+    pub const fn set_keep_array_results_as_blobs(&mut self, v: bool) {
+        self.set(Self::KEEP_ARRAY_RESULTS_AS_BLOBS, v)
     }
 
     #[inline]

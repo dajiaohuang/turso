@@ -45,6 +45,18 @@ expect {
     {1,2}
 }
 
+test array-copy-select-decodes-scalar-custom-type {
+    CREATE TYPE cents BASE integer ENCODE value * 100 DECODE value / 100;
+    CREATE TABLE t1(id INTEGER PRIMARY KEY, a BLOB[], amount cents) STRICT;
+    CREATE TABLE t2(id INTEGER PRIMARY KEY, a BLOB[], amount INTEGER) STRICT;
+    INSERT INTO t1 VALUES (1, ARRAY[x'cafe'], 5);
+    INSERT INTO t2 SELECT id, a, amount FROM t1;
+    SELECT hex(a), amount FROM t2;
+}
+expect {
+    0210CAFE|5
+}
+
 test array-trailing-comma-rejected {
     CREATE TABLE tc1 (id INTEGER PRIMARY KEY, vals integer[]) STRICT;
     INSERT INTO tc1 VALUES (1, '{1,2,}');

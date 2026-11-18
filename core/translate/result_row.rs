@@ -533,7 +533,7 @@ pub(crate) fn emit_array_decode_for_results(
     start_reg: usize,
     resolver: &Resolver,
 ) -> Result<()> {
-    if program.flags.reads_stored_values() {
+    if program.flags.reads_stored_values() || program.flags.keep_array_results_as_blobs() {
         return Ok(());
     }
     let env = TypeEnv::new(Some(table_references), resolver);
