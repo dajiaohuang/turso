@@ -1,5 +1,7 @@
 //! Workload definitions for the simulator.
 
+use std::any::Any;
+
 use rand::{Rng, seq::IndexedRandom};
 use rand_chacha::ChaCha8Rng;
 use sql_generation::{
@@ -42,8 +44,23 @@ impl GenerationContext for WorkloadContext<'_> {
 /// A workload generates operations to be executed on a fiber.
 /// Returns Some(Operation) if an operation was generated, None if this
 /// workload couldn't be applied and another should be tried.
-pub trait Workload: Send + Sync {
+pub trait Workload: Any + Send + Sync {
     fn generate(&self, ctx: &WorkloadContext, rng: &mut ChaCha8Rng) -> Option<Operation>;
+
+    /// True for a read-only workload whose results a property examines. Swarm
+    /// testing never turns such a workload off. A write workload, such as
+    /// NextVal, can be off even if a property examines its results. Then the run
+    /// does not use that feature, so there is nothing to examine.
+    fn checks_results(&self) -> bool {
+        false
+    }
+
+    /// The type name without its module path and `Workload` suffix, for example `Begin`.
+    fn name(&self) -> &'static str {
+        let path = std::any::type_name::<Self>();
+        let name = path.rsplit_once("::").map_or(path, |(_, name)| name);
+        name.strip_suffix("Workload").unwrap_or(name)
+    }
 }
 
 // ============================================================================
@@ -78,6 +95,10 @@ impl Workload for IntegrityCheckWorkload {
             return None;
         }
         Some(Operation::IntegrityCheck)
+    }
+
+    fn checks_results(&self) -> bool {
+        true
     }
 }
 
@@ -120,6 +141,10 @@ impl Workload for SimpleSelectWorkload {
         };
 
         Some(Operation::SimpleSelect { table_name, key })
+    }
+
+    fn checks_results(&self) -> bool {
+        true
     }
 }
 
@@ -695,6 +720,10 @@ impl Workload for CurrValWorkload {
         let seq_name = ctx.sim_state.sequences.pick(rng)?.0.clone();
         Some(Operation::CurrVal { seq_name })
     }
+
+    fn checks_results(&self) -> bool {
+        true
+    }
 }
 
 /// Call nextval() on a random existing sequence.
@@ -945,18 +974,53 @@ impl Workload for FtsMatchWorkload {
             word: word.to_string(),
         })
     }
+
+    fn checks_results(&self) -> bool {
+        true
+    }
+}
+
+pub const UPSERT_SIM_TABLE: &str = "upsert_unique_sim";
+
+pub fn upsert_sim_schema() -> Vec<(String, String)> {
+    vec![(
+        UPSERT_SIM_TABLE.to_string(),
+        format!(
+            "CREATE TABLE IF NOT EXISTS {UPSERT_SIM_TABLE} (id INTEGER PRIMARY KEY, v TEXT UNIQUE)"
+        ),
+    )]
+}
+
+/// Insert or update rows in `UPSERT_SIM_TABLE` via `ON CONFLICT(v) DO UPDATE SET id = excluded.id`.
+/// Each slot `s` in `0..16` only uses rowids congruent to `s (mod 16)` so `id` can move both
+/// upward and downward across checkpoints without colliding with another slot's primary key.
+pub struct UpsertRowidWorkload;
+
+impl Workload for UpsertRowidWorkload {
+    fn generate(&self, _ctx: &WorkloadContext, rng: &mut ChaCha8Rng) -> Option<Operation> {
+        let slot = rng.random_range(0..16_i64);
+        let bucket = rng.random_range(0..10_000_i64);
+        let id = bucket * 16 + slot;
+        let sql = format!(
+            "INSERT INTO {UPSERT_SIM_TABLE} VALUES ({id}, 'k_{slot}') \
+             ON CONFLICT(v) DO UPDATE SET id = excluded.id"
+        );
+        Some(Operation::Execute { sql })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use turso_core::SessionRole;
 
     use rand::SeedableRng;
     use sql_generation::{
         generation::Opts,
         model::table::{Column, ColumnType, Table},
     };
-    use turso_core::{ConnectOpts, Database, MemoryIO, SqliteDialect};
+    use turso_core::{ConnectOpts, Database, MemoryIO};
+    use turso_sqlite::SqliteDialect;
 
     use super::*;
 
@@ -1046,7 +1110,9 @@ mod tests {
     fn json_workload_variants_execute() {
         let io = Arc::new(MemoryIO::new());
         let database = Database::open_file(io, ":memory:", Arc::new(SqliteDialect)).unwrap();
-        let connection = database.connect(ConnectOpts::new()).unwrap();
+        let connection = database
+            .connect(ConnectOpts::new(SessionRole::Superuser))
+            .unwrap();
         let document =
             r#"{"id":1,"meta":{"active":true},"items":[1,2,{"value":3}],"nullable":null}"#;
         let patch = r#"{"patched":true}"#;
