@@ -21,6 +21,10 @@ use super::{
 };
 use crate::{
     function::{AlterTableFunc, Func},
+    schema::alter_table::{
+        rename_identifiers, rewrite_check_expr_table_refs, rewrite_trigger_cmd_table_refs,
+        rewrite_view_sql_for_column_rename,
+    },
     schema::{
         collect_column_dependencies_of_expr, BTreeTable, CheckConstraint, Column, ColumnLayout,
         ForeignKey, FromDefinitionFlags, Index, Schema, Table, EXPR_INDEX_SENTINEL,
@@ -41,8 +45,7 @@ use crate::{
     },
     util::{
         check_expr_references_column, escape_sql_string_literal, normalize_ident,
-        parse_numeric_literal, rename_identifiers, rewrite_check_expr_table_refs,
-        rewrite_trigger_cmd_table_refs, rewrite_view_sql_for_column_rename,
+        parse_numeric_literal,
     },
     vdbe::{
         affinity::Affinity,
@@ -1198,9 +1201,12 @@ pub fn translate_alter_table(
                 "#,
             );
 
-            let cmd = crate::dialect::engine::parse_statement(&stmt).map_err(|e| {
-                LimboError::ParseError(format!("failed to parse generated UPDATE statement: {e}"))
-            })?;
+            let cmd = crate::dialect::parse_statement(connection.dialect().as_ref(), &stmt)
+                .map_err(|e| {
+                    LimboError::ParseError(format!(
+                        "failed to parse generated UPDATE statement: {e}"
+                    ))
+                })?;
             let Some(ast::Cmd::Stmt(ast::Stmt::Update(update))) = cmd else {
                 return Err(LimboError::ParseError(
                     "generated UPDATE statement did not parse as expected".to_string(),
@@ -1227,7 +1233,34 @@ pub fn translate_alter_table(
                 None
             };
 
+            let owned_sequences = if database_id == crate::MAIN_DB_ID {
+                resolver.catalog.dialect.owned_sequences(
+                    resolver.schema(),
+                    namespace.id,
+                    &table_name_norm,
+                    Some(&column_name_norm),
+                )
+            } else {
+                Vec::new()
+            };
+            if let Some(usage) = schema::find_object_using_sequence(
+                resolver,
+                connection,
+                namespace,
+                &owned_sequences,
+                schema::DroppedWithSequences::Column {
+                    table: &table_name_norm,
+                    column: &column_name_norm,
+                },
+            )? {
+                crate::bail_parse_error!(
+                    "cannot drop column {} of table {} because other objects depend on it: {usage}",
+                    column_name_norm,
+                    table_name_norm
+                );
+            }
             let mut rewrite_rows_result = Ok(());
+            let mut owned_sequences_result = Ok(());
             translate_update_for_schema_change(
                 update,
                 resolver,
@@ -1248,6 +1281,12 @@ pub fn translate_alter_table(
                             database_id,
                         );
                     }
+                    owned_sequences_result = owned_sequences.iter().try_for_each(|sequence| {
+                        crate::translate::sequence::emit_drop_sequence(
+                            program, resolver, connection, namespace, sequence,
+                        )
+                        .map(|_| ())
+                    });
 
                     program.emit_insn(Insn::SetCookie {
                         db: database_id,
@@ -1264,7 +1303,8 @@ pub fn translate_alter_table(
                     })
                 },
             )?;
-            rewrite_rows_result?
+            rewrite_rows_result?;
+            owned_sequences_result?
         }
         ast::AlterTableBody::AddColumn(col_def) => {
             let is_generated = col_def
@@ -1414,9 +1454,12 @@ pub fn translate_alter_table(
                 "#,
             );
 
-            let cmd = crate::dialect::engine::parse_statement(&stmt).map_err(|e| {
-                LimboError::ParseError(format!("failed to parse generated UPDATE statement: {e}"))
-            })?;
+            let cmd = crate::dialect::parse_statement(connection.dialect().as_ref(), &stmt)
+                .map_err(|e| {
+                    LimboError::ParseError(format!(
+                        "failed to parse generated UPDATE statement: {e}"
+                    ))
+                })?;
             let Some(ast::Cmd::Stmt(ast::Stmt::Update(update))) = cmd else {
                 return Err(LimboError::ParseError(
                     "generated UPDATE statement did not parse as expected".to_string(),
@@ -1615,6 +1658,7 @@ pub fn translate_alter_table(
                         .namespace_name(database_id)
                         .unwrap_or_else(|| "main".to_string());
                     let new_sql = rewrite_trigger_sql_for_table_rename(
+                        connection.dialect().as_ref(),
                         &trigger_entry.trigger.sql,
                         table_name,
                         new_name,
@@ -1797,11 +1841,13 @@ pub fn translate_alter_table(
                     "#,
                 );
 
-                let cmd = crate::dialect::engine::parse_statement(&update_stmt).map_err(|e| {
-                    LimboError::ParseError(format!(
-                        "failed to parse trigger update SQL for {trigger_name}: {e}"
-                    ))
-                })?;
+                let cmd =
+                    crate::dialect::parse_statement(connection.dialect().as_ref(), &update_stmt)
+                        .map_err(|e| {
+                            LimboError::ParseError(format!(
+                                "failed to parse trigger update SQL for {trigger_name}: {e}"
+                            ))
+                        })?;
                 let Some(ast::Cmd::Stmt(ast::Stmt::Update(update))) = cmd else {
                     return Err(LimboError::ParseError(format!(
                         "failed to parse trigger update SQL for {trigger_name}",
@@ -1894,7 +1940,11 @@ pub fn translate_alter_table(
                 let Some(index_method) = &index.index_method else {
                     continue;
                 };
-                if let Some(attachment) = index_method.rename_column(old_column_name, col_name)? {
+                if let Some(attachment) = index_method.rename_column(
+                    connection.dialect().as_ref(),
+                    old_column_name,
+                    col_name,
+                )? {
                     renamed_index_methods.push((index.name.clone(), attachment));
                 }
             }
@@ -1960,7 +2010,7 @@ pub fn translate_alter_table(
                             resolver.schema(),
                         )?;
                         let replacement_column =
-                            btree.column_for_alter(column_index, &definition)?;
+                            btree.column_for_alter(column_index, &definition, resolver.schema())?;
                         let old_column = &btree.columns()[column_index];
                         // Switching between a rowid alias and a key with an automatic
                         // index would need that index created or dropped.
@@ -2084,7 +2134,6 @@ pub fn translate_alter_table(
                         )?;
                     }
                 }
-                table.resolve_custom_types(resolver.schema())?;
                 let column = &table.columns()[column_index];
                 let ty = column_type(column, table.is_strict, resolver.schema());
                 key_collation(column.text_collation(), &ty, resolver.schema())?;
@@ -2171,6 +2220,7 @@ pub fn translate_alter_table(
                         )));
                     }
                     match rewrite_trigger_sql_for_column_rename(
+                        connection.dialect().as_ref(),
                         &trigger_entry.trigger.sql,
                         table_name,
                         from,
@@ -2221,6 +2271,7 @@ pub fn translate_alter_table(
                     let mut rewrites = Vec::new();
                     for (view_name, view) in s.views(namespace.id) {
                         if let Some(rewritten) = rewrite_view_sql_for_column_rename(
+                            connection.dialect().as_ref(),
                             &view.sql,
                             s,
                             namespace.id,
@@ -2246,6 +2297,7 @@ pub fn translate_alter_table(
                             let mut rewrites = Vec::new();
                             for (view_name, view) in s.views(NamespaceId::ROOT) {
                                 if let Some(rewritten) = rewrite_view_sql_for_column_rename(
+                                    connection.dialect().as_ref(),
                                     &view.sql,
                                     s,
                                     NamespaceId::ROOT,
@@ -2377,11 +2429,13 @@ pub fn translate_alter_table(
                     "#,
                 );
 
-                let cmd = crate::dialect::engine::parse_statement(&update_stmt).map_err(|e| {
-                    LimboError::ParseError(format!(
-                        "failed to parse trigger update SQL for {trigger_name}: {e}"
-                    ))
-                })?;
+                let cmd =
+                    crate::dialect::parse_statement(connection.dialect().as_ref(), &update_stmt)
+                        .map_err(|e| {
+                            LimboError::ParseError(format!(
+                                "failed to parse trigger update SQL for {trigger_name}: {e}"
+                            ))
+                        })?;
                 let Some(ast::Cmd::Stmt(ast::Stmt::Update(update))) = cmd else {
                     return Err(LimboError::ParseError(format!(
                         "failed to parse trigger update SQL for {trigger_name}",
@@ -2410,11 +2464,13 @@ pub fn translate_alter_table(
                     "#,
                 );
 
-                let cmd = crate::dialect::engine::parse_statement(&update_stmt).map_err(|e| {
-                    LimboError::ParseError(format!(
-                        "failed to parse view update SQL for {view_name}: {e}"
-                    ))
-                })?;
+                let cmd =
+                    crate::dialect::parse_statement(connection.dialect().as_ref(), &update_stmt)
+                        .map_err(|e| {
+                            LimboError::ParseError(format!(
+                                "failed to parse view update SQL for {view_name}: {e}"
+                            ))
+                        })?;
                 let Some(ast::Cmd::Stmt(ast::Stmt::Update(update))) = cmd else {
                     return Err(LimboError::ParseError(format!(
                         "failed to parse view update SQL for {view_name}",
@@ -2503,6 +2559,22 @@ pub fn translate_alter_table(
                 )?;
             }
 
+            if col_name != old_column_name
+                && schema::dialect_relation_hooks_apply(connection, database_id)?
+            {
+                resolver.catalog.dialect.translate_catalog_changes(
+                    program,
+                    resolver.schema(),
+                    connection,
+                    &[CatalogChange::RenameColumn {
+                        namespace: namespace.id,
+                        table: normalize_ident(table_name),
+                        old_name: old_column_name.to_string(),
+                        new_name: col_name.to_string(),
+                    }],
+                )?;
+            }
+
             program.emit_insn(Insn::SetCookie {
                 db: database_id,
                 cookie: Cookie::SchemaVersion,
@@ -2537,8 +2609,7 @@ pub fn translate_alter_table(
 /// relation of another kind.
 ///
 /// [`crate::translate::roles::check_statement_privileges`] lets a superuser
-/// run it, and the owner when it names a role it may set, which without
-/// role membership is itself.
+/// run it, and the owner when it names a role it may set.
 fn translate_alter_owner(
     qualified_name: &ast::QualifiedName,
     kind: RelationKind,
@@ -3291,12 +3362,13 @@ Here are some helpers related to that: */
 /// `CREATE TEMP TRIGGER ... ON aux.t` during
 /// `ALTER TABLE main.t RENAME TO ...`.
 fn rewrite_trigger_sql_for_table_rename(
+    dialect: &dyn crate::dialect::Dialect,
     trigger_sql: &str,
     old_table_name: &str,
     new_table_name: &str,
     renamed_db_name: &str,
 ) -> Result<String> {
-    let cmd = crate::dialect::engine::parse_statement(trigger_sql)
+    let cmd = crate::dialect::parse_statement(dialect, trigger_sql)
         .map_err(|e| LimboError::ParseError(format!("failed to parse trigger SQL: {e}")))?;
     let Some(ast::Cmd::Stmt(ast::Stmt::CreateTrigger {
         temporary,
@@ -3364,7 +3436,9 @@ fn rewrite_trigger_sql_for_table_rename(
 /// Check if a trigger contains qualified references to a specific column in its owning table.
 /// Rewrite trigger SQL to replace old column name with new column name.
 /// This handles old.x, new.x, and unqualified x references.
+#[allow(clippy::too_many_arguments)]
 fn rewrite_trigger_sql_for_column_rename(
+    dialect: &dyn crate::dialect::Dialect,
     trigger_sql: &str,
     table_name: &str,
     old_column_name: &str,
@@ -3374,7 +3448,7 @@ fn rewrite_trigger_sql_for_column_rename(
     resolver: &Resolver,
 ) -> Result<String> {
     // Parse the trigger SQL
-    let cmd = crate::dialect::engine::parse_statement(trigger_sql)
+    let cmd = crate::dialect::parse_statement(dialect, trigger_sql)
         .map_err(|e| LimboError::ParseError(format!("failed to parse trigger SQL: {e}")))?;
     let Some(ast::Cmd::Stmt(ast::Stmt::CreateTrigger {
         temporary,
@@ -3606,7 +3680,7 @@ impl<'a> ColumnRenameMode<'a> {
 struct TargetQualifiers {
     names: Vec<String>,
     unqualified_column_is_from_other_table: bool,
-    ctes: rustc_hash::FxHashMap<String, crate::util::ViewColumnSchema>,
+    ctes: rustc_hash::FxHashMap<String, crate::schema::view::ViewColumnSchema>,
 }
 
 impl TargetQualifiers {
@@ -3651,7 +3725,7 @@ impl TargetQualifiers {
                 _ => {
                     other_table_has_column |= resolver
                         .with_schema(database_id, |schema| {
-                            crate::util::select_table_column_names(
+                            crate::schema::view::select_table_column_names(
                                 NamespaceId::ROOT,
                                 select_table,
                                 schema,
@@ -4119,7 +4193,7 @@ fn apply_select_for_column_rename(
 ) -> Result<()> {
     let outer_target_qualifiers = &TargetQualifiers {
         ctes: resolver.with_schema(database_id, |schema| {
-            crate::util::extract_cte_columns(
+            crate::schema::view::extract_cte_columns(
                 NamespaceId::ROOT,
                 &select.with,
                 schema,
@@ -4187,7 +4261,7 @@ fn apply_select_for_column_rename(
     // the alias label, which is independent of the renamed table column.
     let body = &select.body;
     for sorted_col in &mut select.order_by {
-        if crate::util::is_order_by_alias_ref(body, &sorted_col.expr, old_col_norm) {
+        if crate::schema::alter_table::is_order_by_alias_ref(body, &sorted_col.expr, old_col_norm) {
             continue;
         }
         apply_expr_for_column_rename(
@@ -5887,7 +5961,7 @@ fn collect_select_table_visible_columns_from_output(
 }
 
 fn collect_one_select_output_columns(one_select: &ast::OneSelect) -> Vec<String> {
-    crate::util::output_column_aliases(one_select)
+    crate::schema::alter_table::output_column_aliases(one_select)
 }
 
 /// Check a single expression node for invalid column references after a DROP COLUMN.

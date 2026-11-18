@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use turso_core::alloc::DynAllocator;
-use turso_core::io::PlatformIO;
+use turso_core::io::{MemoryIO, PlatformIO, IO};
 use turso_core::mvcc::database::MvStore;
 use turso_core::mvcc::MvccClock;
 use turso_core::{
@@ -15,10 +15,17 @@ pub struct MvccTestDbNoConn {
     path: String,
     opts: DatabaseOpts,
     enc_opts: Option<EncryptionOpts>,
+    in_memory: bool,
     _temp_dir: tempfile::TempDir,
 }
 
 impl MvccTestDbNoConn {
+    /// Opens an in-memory database, which cannot be restarted.
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self::create(DatabaseOpts::new(), None, true)
+    }
+
     pub fn new_with_random_db() -> Self {
         Self::new_with_random_db_with_opts(DatabaseOpts::new())
     }
@@ -31,7 +38,7 @@ impl MvccTestDbNoConn {
     }
 
     pub fn new_with_random_db_with_opts(opts: DatabaseOpts) -> Self {
-        Self::create(opts, None)
+        Self::create(opts, None, false)
     }
 
     /// Opens a database that is encrypted with a randomly picked cipher when `encrypted` is true.
@@ -55,6 +62,10 @@ impl MvccTestDbNoConn {
         Self::new_encrypted_with_cipher(hexkey, cipher)
     }
 
+    pub fn new_encrypted(hex_key: &str) -> Self {
+        Self::new_encrypted_with_cipher(hex_key, "aes256gcm")
+    }
+
     fn new_encrypted_with_cipher(hex_key: &str, cipher: &str) -> Self {
         Self::create(
             DatabaseOpts::new().with_encryption(true),
@@ -62,22 +73,28 @@ impl MvccTestDbNoConn {
                 cipher: cipher.to_string(),
                 hexkey: hex_key.to_string(),
             }),
+            false,
         )
     }
 
-    fn create(opts: DatabaseOpts, enc_opts: Option<EncryptionOpts>) -> Self {
+    fn create(opts: DatabaseOpts, enc_opts: Option<EncryptionOpts>, in_memory: bool) -> Self {
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let path = temp_dir
-            .path()
-            .join(format!("test_{}", rand::random::<u64>()))
-            .to_str()
-            .unwrap()
-            .to_string();
+        let path = if in_memory {
+            ":memory:".to_string()
+        } else {
+            temp_dir
+                .path()
+                .join(format!("test_{}", rand::random::<u64>()))
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
         let mut db = Self {
             db: None,
             path,
             opts,
             enc_opts,
+            in_memory,
             _temp_dir: temp_dir,
         };
         db.open().unwrap();
@@ -100,7 +117,11 @@ impl MvccTestDbNoConn {
     }
 
     fn open(&mut self) -> turso_core::Result<()> {
-        let io = Arc::new(PlatformIO::new().unwrap());
+        let io: Arc<dyn IO> = if self.in_memory {
+            Arc::new(MemoryIO::new())
+        } else {
+            Arc::new(PlatformIO::new().unwrap())
+        };
         let db = Database::open_file_with_flags(
             io,
             &self.path,
@@ -123,6 +144,11 @@ impl MvccTestDbNoConn {
                 "a connection is still open, so the database would not be closed"
             );
         }
+    }
+
+    /// Changes the encryption that the next `restart` opens the database with.
+    pub fn set_encryption(&mut self, enc_opts: Option<EncryptionOpts>) {
+        self.enc_opts = enc_opts;
     }
 
     pub fn path(&self) -> &str {
