@@ -9,10 +9,15 @@ use turso_parser::ast::{self, SortOrder, TableInternalId};
 use crate::alloc::{TursoIteratorExt, TursoTryWithCapacityExt, TursoVecExt};
 use crate::schema::Schema;
 use crate::stats::AnalyzeStats;
-use crate::translate::expr::{as_binary_components, comparison_affinity, walk_expr, WalkControl};
+use crate::translate::collate::comparison_collation;
+use crate::translate::emitter::Resolver;
+use crate::translate::expr::{
+    as_binary_components, do_comparison_affinity, walk_expr, WalkControl,
+};
+use crate::translate::expr_context::ExprContext;
 use crate::translate::optimizer::constraints::{
-    convert_to_vtab_constraint, expr_uses_custom_collation, ordered_ephemeral_key_columns,
-    partial_index, partial_index_predicate_terms, BinaryExprSide, Constraint, ConstraintOperator,
+    convert_to_vtab_constraint, ordered_ephemeral_key_columns, partial_index,
+    partial_index_predicate_terms, BinaryExprSide, Constraint, ConstraintOperator,
     RangeConstraintRef,
 };
 use crate::translate::optimizer::cost::{rows_per_leaf_page_for_index, RowCountEstimate};
@@ -21,6 +26,7 @@ use crate::translate::plan::{
     plan_has_outer_scope_dependency, BitSet, HashJoinKey, HashJoinType, JoinInfo, JoinOrigin,
     NonFromClauseSubquery, Plan, SetOperation, SubqueryState, TableReferences, WhereTerm,
 };
+use crate::translate::planner::table_mask_from_expr;
 use crate::util::exprs_are_equivalent;
 use crate::vdbe::affinity::Affinity;
 use crate::vdbe::hash_table::DEFAULT_MEM_BUDGET;
@@ -43,6 +49,7 @@ use super::{
     join::JoinPlanningContext,
     multi_index::{
         consider_multi_index_intersection, consider_multi_index_union, MultiIndexBranchParams,
+        MultiIndexTableWork,
     },
     order::{
         btree_access_order_consumed, subquery_intrinsic_order_consumed, ColumnTarget,
@@ -403,18 +410,15 @@ pub(super) fn choose_best_btree_candidate(
                 .into_iter()
                 .flatten()
                 {
-                    let c = &rhs_constraints.constraints[idx];
-                    mask = mask.iter().chain(c.lhs_mask.iter()).try_collect()?;
+                    mask.union_with(&rhs_constraints.constraints[idx].lhs_mask)?;
                 }
             }
             mask
         };
         // Tables whose constraints this loop can account for: the loop's own
         // prerequisite tables plus the current table itself.
-        let allowed_mask: TableMask = loop_prereq_mask
-            .iter()
-            .chain(rhs_table_mask.iter())
-            .try_collect()?;
+        let mut allowed_mask = loop_prereq_mask;
+        allowed_mask.union_with(&rhs_table_mask)?;
 
         // Collect which constraint positions are consumed by the index seek.
         let consumed: SmallVec<[usize; 8]> = usable_constraint_refs
@@ -548,6 +552,9 @@ pub(super) fn choose_best_in_seek_candidate(
             "consider_in_seek_access_method called on non-BTree table".into(),
         ));
     };
+    if !has_in_seek_constraint(rhs_constraints) {
+        return Ok(None);
+    }
 
     let base = *base_row_count;
     let tree_depth = estimate_btree_depth(base, params.rows_per_table_page);
@@ -619,17 +626,15 @@ pub(super) fn choose_best_in_seek_candidate(
                 continue;
             }
 
-            // `open_loop` copies the chosen index collation onto the ephemeral
-            // IN cursor. Reject mismatches here so a BINARY `IN` comparison
-            // cannot silently become `NOCASE`/`RTRIM` just because the index is.
+            // The seek compares with the index's collation, and `open_loop`
+            // removes duplicate IN values with it, so it must be the
+            // collation the IN compares with.
             if let (Some(index), Some(col_pos)) = (&candidate.index, constraint.table_col_pos) {
-                let constrained_column = &rhs_table.table.columns()[col_pos];
-                let table_collation = constrained_column.collation();
-                let index_collation = index.columns[0].collation.unwrap_or_default();
-                if table_collation != index_collation {
+                if !constraint.index_column_can_serve(&index.columns[0]) {
                     continue;
                 }
-                let idx_aff = constrained_column.affinity();
+                let constrained_column = &rhs_table.table.columns()[col_pos];
+                let idx_aff = constrained_column.comparison_affinity();
                 if !constraint.satisfies_index_affinity(idx_aff) {
                     continue;
                 }
@@ -655,15 +660,11 @@ pub(super) fn choose_best_in_seek_candidate(
             }
 
             let lhs_affinity = if let Some(col_pos) = constraint.table_col_pos {
-                btree
-                    .columns()
-                    .get(col_pos)
-                    .map(|col| col.affinity())
-                    .unwrap_or(Affinity::Blob)
+                btree.columns()[col_pos].comparison_affinity()
             } else {
                 Affinity::Integer
             };
-            let affinity = comparison_affinity(lhs_affinity, Affinity::None, None, None);
+            let affinity = do_comparison_affinity(lhs_affinity, Affinity::None);
             best_in_seek_cost = in_cost;
             best_in_seek = Some(ChosenInSeekCandidate {
                 index: candidate.index.clone(),
@@ -676,6 +677,14 @@ pub(super) fn choose_best_in_seek_candidate(
     }
 
     Ok(best_in_seek)
+}
+
+/// Whether a constraint of the table is an `IN` that can drive an IN seek.
+pub(super) fn has_in_seek_constraint(constraints: &TableConstraints) -> bool {
+    constraints
+        .constraints
+        .iter()
+        .any(|c| matches!(c.operator, ConstraintOperator::In { not: false, .. }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -766,13 +775,13 @@ fn replace_if_cheaper(
 
 /// Return the best [AccessMethod] for a given join order.
 #[allow(clippy::too_many_arguments)]
-pub fn find_best_access_method_for_join_order(
+pub fn find_best_access_method_for_join_order<'a>(
     rhs_table: &JoinedTable,
     rhs_constraints: &TableConstraints,
     lhs_mask: &TableMask,
     join_order: &[JoinOrderMember],
     planning_context: JoinPlanningContext<'_>,
-    where_clause: &[WhereTerm],
+    where_clause: &'a [WhereTerm],
     ready_where: &[(usize, usize)],
     available_indexes: &AvailableIndexes,
     table_references: &TableReferences,
@@ -782,6 +791,7 @@ pub fn find_best_access_method_for_join_order(
     input_cardinality: f64,
     base_row_count: RowCountEstimate,
     params: &CostModelParams,
+    multi_index_work: Option<&MultiIndexTableWork<'a>>,
 ) -> Result<Option<AccessMethod>> {
     match &rhs_table.table {
         Table::BTree(_) => find_best_access_method_for_btree(
@@ -801,6 +811,8 @@ pub fn find_best_access_method_for_join_order(
             input_cardinality,
             base_row_count,
             params,
+            planning_context.resolver,
+            multi_index_work,
         ),
         Table::Virtual(vtab) => find_best_access_method_for_vtab(
             vtab,
@@ -842,14 +854,14 @@ pub fn find_best_access_method_for_join_order(
 
 #[allow(clippy::too_many_arguments)]
 /// Return the best B-tree access method, or `None` if `INDEXED BY` leaves no valid method.
-fn find_best_access_method_for_btree(
+fn find_best_access_method_for_btree<'a>(
     rhs_table: &JoinedTable,
     rhs_constraints: &TableConstraints,
     lhs_mask: &TableMask,
     join_order: &[JoinOrderMember],
     maybe_order_target: Option<&OrderTarget>,
     allow_automatic_index: bool,
-    where_clause: &[WhereTerm],
+    where_clause: &'a [WhereTerm],
     ready_where: &[(usize, usize)],
     available_indexes: &AvailableIndexes,
     table_references: &TableReferences,
@@ -859,6 +871,8 @@ fn find_best_access_method_for_btree(
     input_cardinality: f64,
     base_row_count: RowCountEstimate,
     params: &CostModelParams,
+    resolver: &Resolver,
+    multi_index_work: Option<&MultiIndexTableWork<'a>>,
 ) -> Result<Option<AccessMethod>> {
     let rhs_table_idx = join_order.last().unwrap().original_idx;
     let Some(best) = choose_best_btree_candidate(
@@ -1068,7 +1082,9 @@ fn find_best_access_method_for_btree(
 
         // Multi-index scans do not record matched rowids for a RIGHT or FULL JOIN,
         // so the unmatched-row pass would emit matched right rows again.
-        if keeps_right_rows {
+        // They also check each branch's conditions on rows before the loop
+        // checks their row-level security filter.
+        if keeps_right_rows || rhs_table.row_filter.is_some() {
             return Ok(Some(best_access_method));
         }
 
@@ -1085,6 +1101,8 @@ fn find_best_access_method_for_btree(
             best_cost_with_filters,
             lhs_mask,
             analyze_stats,
+            resolver,
+            multi_index_work,
         )? {
             replace_if_cheaper(
                 &mut best_access_method,
@@ -1112,6 +1130,8 @@ fn find_best_access_method_for_btree(
             best_cost_with_filters,
             lhs_mask,
             analyze_stats,
+            resolver,
+            multi_index_work,
         )? {
             replace_if_cheaper(
                 &mut best_access_method,
@@ -1242,14 +1262,43 @@ fn one_table_in_expr(expr: &ast::Expr) -> Option<TableInternalId> {
 }
 
 /// Return the two tables used by one equal test.
-pub(super) fn tables_in_equal_test(expr: &ast::Expr) -> Option<(TableInternalId, TableInternalId)> {
+/// The two tables of an equal test that a hash join can use: each side reads
+/// one table, and the test compares with a collation that can be hashed.
+pub(super) fn tables_in_hashable_equal_test(
+    expr: &ast::Expr,
+    tables: &TableReferences,
+    subqueries: &[NonFromClauseSubquery],
+    resolver: &Resolver,
+) -> Result<Option<(TableInternalId, TableInternalId)>> {
     let Ok(Some((left, operator, right))) = as_binary_components(expr) else {
-        return None;
+        return Ok(None);
     };
     if !matches!(operator.as_ast_operator(), Some(ast::Operator::Equals)) {
-        return None;
+        return Ok(None);
     }
-    Some((one_table_in_expr(left)?, one_table_in_expr(right)?))
+    let (Some(left_table), Some(right_table)) = (one_table_in_expr(left), one_table_in_expr(right))
+    else {
+        return Ok(None);
+    };
+    // A subquery in a key can read other tables of the join. The key is computed
+    // in the loop of its own table, before the loops of those tables run.
+    let reads_only = |side: &ast::Expr, table: TableInternalId| -> Result<bool> {
+        let Some(table_idx) = tables
+            .joined_tables()
+            .iter()
+            .position(|t| t.internal_id == table)
+        else {
+            return Ok(false);
+        };
+        Ok(table_mask_from_expr(side, tables, subqueries)?.is_only(table_idx))
+    };
+    if !reads_only(left, left_table)? || !reads_only(right, right_table)? {
+        return Ok(None);
+    }
+    if !comparison_collation(left, right, &ExprContext::new(Some(tables), resolver))?.can_hash() {
+        return Ok(None);
+    }
+    Ok(Some((left_table, right_table)))
 }
 
 /// Find equal tests that a hash join can use.
@@ -1350,7 +1399,7 @@ pub fn try_hash_join_access_method(
     build_constraints: &TableConstraints,
     probe_constraints: &TableConstraints,
     joined_before_probe_mask: &TableMask,
-    where_clause: &mut [WhereTerm],
+    where_clause: &[WhereTerm],
     equal_terms: impl Iterator<Item = (usize, TableInternalId, TableInternalId)>,
     max_distinct_build_keys: f64,
     build_cardinality: f64,
@@ -1395,15 +1444,6 @@ pub fn try_hash_join_access_method(
     if join_keys.is_empty() {
         return Ok(None);
     }
-    // Custom-collated equality depends on a connection-owned callback, so the
-    // hash join planner cannot derive a stable hash/equality pair here.
-    if join_keys.iter().any(|join_key| {
-        expr_uses_custom_collation(join_key.get_build_expr(where_clause))
-            || expr_uses_custom_collation(join_key.get_probe_expr(where_clause))
-    }) {
-        return Ok(None);
-    }
-
     // Prefer nested loops when an index can read the join columns.
     for join_key in &join_keys {
         let probe_expr = join_key.get_probe_expr(where_clause);
@@ -1819,10 +1859,11 @@ fn find_best_access_method_for_subquery(
 
     // SQLite does not build an automatic index on the right side of a
     // RIGHT JOIN or FULL JOIN. The unmatched-row pass must scan that source.
-    if rhs_table
-        .join_info
-        .as_ref()
-        .is_some_and(JoinInfo::keeps_right_rows)
+    if !planning_context.allow_automatic_index
+        || rhs_table
+            .join_info
+            .as_ref()
+            .is_some_and(JoinInfo::keeps_right_rows)
     {
         return Ok(Some(AccessMethod {
             cost: scan_cost,
@@ -2086,14 +2127,14 @@ fn materialized_subquery_ephemeral_index(
 ) -> Result<Arc<Index>> {
     let mut index_columns: crate::alloc::Vec<IndexColumn> =
         crate::alloc::Vec::try_with_capacity_ext(subquery.columns.len())?;
-    let mut seen_col_positions = std::collections::HashSet::new();
+    let mut is_key_column = vec![false; subquery.columns.len()];
 
     for &col_pos in key_col_positions {
         let column = subquery
             .columns
             .get(col_pos)
             .expect("key column position out of bounds for materialized subquery");
-        if !seen_col_positions.insert(col_pos) {
+        if std::mem::replace(&mut is_key_column[col_pos], true) {
             continue;
         }
         index_columns
@@ -2102,7 +2143,8 @@ fn materialized_subquery_ephemeral_index(
                 order: SortOrder::Asc,
                 nulls_order: None,
                 pos_in_table: col_pos,
-                collation: column.collation_opt(),
+                collation: column.collation(),
+                explicit_collation: None,
                 default: column.default.clone(),
                 expr: None,
             })
@@ -2110,7 +2152,7 @@ fn materialized_subquery_ephemeral_index(
     }
 
     for (col_pos, column) in subquery.columns.iter().enumerate() {
-        if seen_col_positions.contains(&col_pos) {
+        if is_key_column[col_pos] {
             continue;
         }
         index_columns
@@ -2119,7 +2161,8 @@ fn materialized_subquery_ephemeral_index(
                 order: SortOrder::Asc,
                 nulls_order: None,
                 pos_in_table: col_pos,
-                collation: column.collation_opt(),
+                collation: column.collation(),
+                explicit_collation: None,
                 default: column.default.clone(),
                 expr: None,
             })

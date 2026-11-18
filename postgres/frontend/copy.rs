@@ -1,4 +1,4 @@
-//! COPY FROM text format parser.
+//! COPY text encoding and parsing.
 //!
 //! Implements PostgreSQL's default COPY text format:
 //! - One row per line (`\n`)
@@ -9,7 +9,113 @@
 //! - Empty field = empty string (not NULL)
 //! - Lines starting with `\.` = end of data
 
-use turso_core::{LimboError, Result};
+use crate::session::relation_lookup_namespaces;
+use crate::text::{value_text, TextType};
+use turso_core::{LimboError, Result, Row};
+use turso_pg_parser::{copy::CopyToStdout, quote_identifier};
+
+pub struct CopyTextEncoder {
+    columns: Vec<TextType>,
+}
+
+impl CopyTextEncoder {
+    pub fn new(stmt: &crate::Statement) -> Self {
+        let columns = (0..stmt.num_columns())
+            .map(|index| TextType::of_column(stmt, index))
+            .collect();
+        Self { columns }
+    }
+
+    /// Append one COPY text record, including its trailing newline.
+    pub fn encode_row(&self, row: &Row, output: &mut Vec<u8>) {
+        assert_eq!(row.len(), self.columns.len());
+        for (index, (value, text_type)) in row.get_values().zip(&self.columns).enumerate() {
+            if index > 0 {
+                output.push(b'\t');
+            }
+            match value_text(value, *text_type) {
+                None => output.extend_from_slice(b"\\N"),
+                Some(text) => escape_copy_text(text.as_bytes(), output),
+            }
+        }
+        output.push(b'\n');
+    }
+}
+
+fn escape_copy_text(bytes: &[u8], output: &mut Vec<u8>) {
+    for byte in bytes {
+        match byte {
+            b'\\' => output.extend_from_slice(b"\\\\"),
+            b'\t' => output.extend_from_slice(b"\\t"),
+            b'\n' => output.extend_from_slice(b"\\n"),
+            b'\r' => output.extend_from_slice(b"\\r"),
+            8 => output.extend_from_slice(b"\\b"),
+            12 => output.extend_from_slice(b"\\f"),
+            11 => output.extend_from_slice(b"\\v"),
+            byte => output.push(*byte),
+        }
+    }
+}
+
+pub(crate) fn prepare_copy_to_stdout(
+    conn: &std::sync::Arc<turso_core::Connection>,
+    spec: &CopyToStdout,
+) -> Result<turso_core::Statement> {
+    let mut found = None;
+    for namespace in relation_lookup_namespaces(conn, spec.schema.as_deref()) {
+        let table = conn.with_schema(namespace.database_id(), |schema| {
+            let ns = namespace.target.id;
+            if schema.get_view(ns, &spec.table).is_some()
+                || schema.is_materialized_view(ns, &spec.table)
+            {
+                return Err(LimboError::ParseError(
+                    "COPY TO STDOUT requires a plain table".to_owned(),
+                ));
+            }
+            schema
+                .get_table(ns, &spec.table)
+                .map(|table| {
+                    table.btree().ok_or_else(|| {
+                        LimboError::ParseError("COPY TO STDOUT requires a plain table".to_owned())
+                    })
+                })
+                .transpose()
+        })?;
+        if let Some(table) = table {
+            found = Some((namespace, table));
+            break;
+        }
+    }
+    let (namespace, table) = found.ok_or_else(|| {
+        LimboError::ParseError(format!("COPY table '{}' does not exist", spec.table))
+    })?;
+    let columns = if spec.columns.is_empty() {
+        table
+            .columns()
+            .iter()
+            .filter(|column| !column.hidden() && !column.is_generated())
+            .map(|column| column.name.as_ref().expect("table columns have names"))
+            .collect::<Vec<_>>()
+    } else {
+        for name in &spec.columns {
+            let (_, column) = table.get_column(name).ok_or_else(|| {
+                LimboError::ParseError(format!("COPY column '{name}' does not exist"))
+            })?;
+            column.ensure_not_generated("COPY", name)?;
+        }
+        spec.columns.iter().collect()
+    };
+    let columns = columns
+        .into_iter()
+        .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    conn.prepare_sqlite(format!(
+        "SELECT {columns} FROM {}.{}",
+        quote_identifier(&namespace.name),
+        quote_identifier(&spec.table)
+    ))
+}
 
 /// A parsed row from COPY text format: each element is None for NULL, Some for a value.
 type CopyRow = Vec<Option<String>>;
